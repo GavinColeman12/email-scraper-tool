@@ -67,25 +67,59 @@ def _parse_business(biz: dict) -> dict:
     }
 
 
-def search_businesses(query: str, location: str = "",
-                      max_results: int = 50) -> list:
-    """
-    Search Google Maps for businesses matching the query in the location.
-    Paginates automatically. Returns up to max_results businesses.
+# When Google Maps caps a single query at 20-60 results, these synonyms
+# let us keep going by re-querying with related terms. Picked to be
+# semantically equivalent — all return the same kind of business.
+QUERY_SYNONYMS = {
+    "dental office": ["dentist", "dental clinic", "dental practice", "family dentistry", "cosmetic dentist"],
+    "dentist": ["dental office", "dental clinic", "dental practice", "family dentistry"],
+    "dental clinic": ["dentist", "dental office", "dental practice"],
+    "law firm": ["attorney", "lawyer", "legal services", "law office"],
+    "attorney": ["law firm", "lawyer", "legal services"],
+    "lawyer": ["law firm", "attorney", "legal services"],
+    "restaurant": ["eatery", "dining", "bistro", "cafe"],
+    "chiropractor": ["chiropractic clinic", "chiropractic office", "spine care"],
+    "accountant": ["CPA", "accounting firm", "tax preparation"],
+    "veterinarian": ["vet clinic", "animal hospital", "pet clinic"],
+    "plumber": ["plumbing service", "plumbing company", "plumbing contractor"],
+    "electrician": ["electrical service", "electrical contractor"],
+    "hvac": ["hvac contractor", "heating and cooling", "air conditioning"],
+    "roofer": ["roofing contractor", "roofing company"],
+    "gym": ["fitness center", "fitness studio", "health club"],
+    "salon": ["hair salon", "beauty salon"],
+    "barber": ["barbershop", "men's haircuts"],
+    "med spa": ["medspa", "medical spa", "aesthetic clinic"],
+    "orthodontist": ["orthodontics", "braces clinic"],
+    "optometrist": ["eye doctor", "optical shop", "vision center"],
+}
 
-    Typical query forms:
-      search_businesses("dental clinic", "Manhattan NYC")
-      search_businesses("law firm", "Brooklyn NY", max_results=100)
-    """
-    full_query = f"{query} {location}".strip()
+
+def _query_variants(query: str) -> list:
+    """Return ordered list of queries to try, starting with the user's input."""
+    q = query.strip().lower()
+    variants = [query]  # always try the exact user query first
+    for synonym in QUERY_SYNONYMS.get(q, []):
+        variants.append(synonym)
+    # Dedupe case-insensitively, preserving order
+    seen = set()
+    out = []
+    for v in variants:
+        k = v.strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(v)
+    return out
+
+
+def _single_query_paginated(full_query: str, max_results: int,
+                             seen_place_ids: set) -> list:
+    """Run one query with full pagination, deduped against seen_place_ids."""
     results = []
     start = 0
+    empty_pages = 0
 
     while len(results) < max_results:
-        params = {
-            "engine": "google_maps",
-            "q": full_query,
-        }
+        params = {"engine": "google_maps", "q": full_query}
         if start > 0:
             params["start"] = start
 
@@ -100,31 +134,93 @@ def search_businesses(query: str, location: str = "",
             for key in ("place_result", "place_results", "knowledge_graph"):
                 pr = data.get(key)
                 if pr and isinstance(pr, dict) and (pr.get("title") or pr.get("name")):
-                    results.append(_parse_business(pr))
-            break
+                    parsed = _parse_business(pr)
+                    pid = parsed.get("place_id")
+                    if pid and pid not in seen_place_ids:
+                        seen_place_ids.add(pid)
+                        results.append(parsed)
+            empty_pages += 1
+            if empty_pages >= 2:  # two empty pages in a row = genuine end
+                break
+            start += 20
+            time.sleep(0.3)
+            continue
 
+        empty_pages = 0
+        new_this_page = 0
         for biz in local_results:
             parsed = _parse_business(biz)
-            # Dedupe by place_id
-            if parsed.get("place_id") and any(
-                r.get("place_id") == parsed["place_id"] for r in results
-            ):
+            pid = parsed.get("place_id")
+            if pid and pid in seen_place_ids:
                 continue
+            if pid:
+                seen_place_ids.add(pid)
             results.append(parsed)
+            new_this_page += 1
             if len(results) >= max_results:
                 break
 
-        # SearchApi Google Maps paginates in increments of 20
+        # If the page produced nothing new (all dupes), Google is recycling —
+        # further pagination won't help on this query.
+        if new_this_page == 0:
+            break
+
         start += 20
-        if start >= 100:  # Practical cap per query
+        # Softer upper bound — try up to 10 pages per query (200 offset)
+        # before giving up. Google Maps rarely goes deeper than this.
+        if start >= 200:
             break
         time.sleep(0.3)
 
-    return results[:max_results]
+    return results
+
+
+def search_businesses(query: str, location: str = "",
+                      max_results: int = 50) -> list:
+    """
+    Search Google Maps for businesses matching the query in the location.
+
+    Strategy:
+    1. Run the exact user query with full pagination
+    2. If still below max_results, retry with synonym variants (e.g.
+       "dental office" → "dentist" → "dental clinic")
+    3. Dedupe everything by place_id across all variants
+
+    Typical query forms:
+      search_businesses("dental clinic", "Manhattan NYC")
+      search_businesses("law firm", "Brooklyn NY", max_results=100)
+    """
+    all_results = []
+    seen_place_ids = set()
+
+    for variant in _query_variants(query):
+        needed = max_results - len(all_results)
+        if needed <= 0:
+            break
+        full_query = f"{variant} {location}".strip()
+        try:
+            batch = _single_query_paginated(full_query, needed, seen_place_ids)
+        except SearchError:
+            # Propagate auth/quota errors; they won't be fixed by more queries
+            if not all_results:
+                raise
+            break
+        all_results.extend(batch)
+        if len(all_results) >= max_results:
+            break
+
+    return all_results[:max_results]
 
 
 def estimate_cost(max_results: int) -> float:
-    """Estimate SearchApi credit cost for a given search size."""
+    """Estimate SearchApi credit cost for a given search size.
+
+    Upper bound — the scraper may use synonym variants if the base query
+    doesn't return enough results, adding ~1 extra API call per variant.
+    """
     pages = max(1, (max_results + 19) // 20)
+    # Add ~2 extra calls to budget for synonym variants on larger searches
+    if max_results > 40:
+        pages += 2
     # SearchApi charges ~1 credit per call, typically ~$0.005 per credit
     return pages * 0.005
