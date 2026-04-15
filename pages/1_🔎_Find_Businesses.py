@@ -26,6 +26,13 @@ with st.form("search_form"):
                               placeholder="e.g. Manhattan NYC, Brooklyn NY")
     max_results = c3.slider("Max results", 10, 100, 40)
 
+    skip_seen = st.checkbox(
+        "🧹 Skip businesses I've already seen (dedupe by Google place_id)",
+        value=True,
+        help="Checks all past searches and hides any businesses already in your DB. "
+             "Lets you run the same query repeatedly and always see fresh results."
+    )
+
     est = estimate_cost(max_results)
     st.caption(
         f"💰 Estimated cost: ~${est:.2f} SearchApi credits "
@@ -49,10 +56,27 @@ if submitted:
                 results = []
 
         if results:
-            st.success(f"Found **{len(results)}** businesses.")
-            st.session_state["last_results"] = results
-            st.session_state["last_query"] = query
-            st.session_state["last_location"] = location
+            total_found = len(results)
+            if skip_seen:
+                known_ids = storage.existing_place_ids()
+                before = len(results)
+                results = [r for r in results if r.get("place_id") not in known_ids]
+                skipped = before - len(results)
+                if skipped > 0:
+                    st.info(
+                        f"🧹 Skipped **{skipped}** businesses already in your database — "
+                        f"showing **{len(results)}** new ones (of {total_found} found)."
+                    )
+            if results:
+                st.success(f"Found **{len(results)}** businesses.")
+                st.session_state["last_results"] = results
+                st.session_state["last_query"] = query
+                st.session_state["last_location"] = location
+            else:
+                st.warning(
+                    "All businesses from this search are already in your database. "
+                    "Try a different query, location, or uncheck the dedupe box."
+                )
 
 # ── Show results + save ──
 results = st.session_state.get("last_results", [])

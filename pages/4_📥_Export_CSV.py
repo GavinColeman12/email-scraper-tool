@@ -39,6 +39,20 @@ min_rating = col1.number_input("Min rating", 0.0, 5.0, 0.0, step=0.1)
 max_rating = col2.number_input("Max rating", 0.0, 5.0, 5.0, step=0.1)
 min_reviews = col3.number_input("Min reviews", 0, 100000, 0)
 
+# Confidence filter
+st.markdown("**Confidence level** (decision-maker quality)")
+conf_c1, conf_c2, conf_c3, conf_c4 = st.columns(4)
+conf_high = conf_c1.checkbox("🟢 High", value=True)
+conf_medium = conf_c2.checkbox("🟡 Medium", value=True)
+conf_low = conf_c3.checkbox("🔴 Low", value=True)
+conf_blank = conf_c4.checkbox("⚪ Blank (older data)", value=True)
+
+allowed_confidences = set()
+if conf_high: allowed_confidences.add("high")
+if conf_medium: allowed_confidences.add("medium")
+if conf_low: allowed_confidences.add("low")
+if conf_blank: allowed_confidences.add("")
+
 # ── Build CSV ──
 businesses = storage.list_businesses(search_id=search_id)
 
@@ -64,6 +78,8 @@ def matches(b):
     if rating < min_rating or rating > max_rating:
         return False
     if (b.get("review_count") or 0) < min_reviews:
+        return False
+    if (b.get("confidence") or "") not in allowed_confidences:
         return False
     return True
 

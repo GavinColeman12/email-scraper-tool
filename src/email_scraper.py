@@ -63,14 +63,15 @@ CONTACT_PATHS = [
     "our-doctors",
 ]
 
-# Look for doctor/owner names on the page (for drname@ pattern construction)
-# Expanded to include more decision-maker titles
+# Look for doctor/owner names. Title keywords use inline (?i:...) so case
+# doesn't matter for the title, but the name tokens MUST start with a capital
+# letter — this prevents lowercase phrases like "partner network community"
+# from matching as "(Partner) (network) (community)".
 PERSON_TITLE_RE = re.compile(
-    r"\b(Dr\.?|Doctor|Attorney|Lawyer|CEO|Owner|Founder|Co-?Founder|"
+    r"\b((?i:Dr\.?|Doctor|Attorney|Lawyer|CEO|Owner|Founder|Co-?Founder|"
     r"President|Managing\s+Partner|Managing\s+Director|Principal|Partner|"
-    r"Director|DDS|DMD|MD)\s+"
-    r"([A-Z][a-zA-Z\-']+)(?:\s+([A-Z][a-zA-Z\-']+))?",
-    re.IGNORECASE,
+    r"Director|DDS|DMD|MD))\s+"
+    r"([A-Z][a-zA-Z\-']+)(?:\s+([A-Z][a-zA-Z\-']+))?"
 )
 
 # Decision-maker title words — used to rank which extracted person is
@@ -123,8 +124,30 @@ def _is_rejected(email: str) -> bool:
     return False
 
 
-def _extract_from_html(html: str) -> tuple:
-    """Return (emails, person_names) found in the HTML."""
+# Rank page URL paths by how authoritative "this is a real person at this
+# business" signal is. Higher = stronger signal.
+PAGE_AUTHORITY = {
+    "team": 10, "our-team": 10, "meet-the-team": 10, "our_team": 10,
+    "staff": 9, "doctors": 9, "our-doctors": 9, "providers": 9,
+    "leadership": 10,
+    "about": 7, "about-us": 7, "about_us": 7,
+    "contact": 5, "contact-us": 5, "contact_us": 5,
+    "": 3,   # homepage
+}
+
+
+def _page_authority(url_path: str) -> int:
+    path = (url_path or "").strip("/").lower().split("/")[-1]
+    return PAGE_AUTHORITY.get(path, 4)
+
+
+def _extract_from_html(html: str, page_path: str = "") -> tuple:
+    """
+    Return (emails, person_names) found in the HTML.
+    Each person now carries:
+      - found_on: the URL path they were found on
+      - authority: integer signal (team page > about > contact > homepage)
+    """
     emails = []
     person_names = []
 
@@ -141,13 +164,13 @@ def _extract_from_html(html: str) -> tuple:
             if email and "@" in email and not _is_rejected(email):
                 emails.append(email.lower())
 
-    # Regex sweep on full HTML (catches obfuscated emails with mailto
-    # variants and plain-text mentions)
+    # Regex sweep on full HTML
     for match in EMAIL_RE.findall(html):
         if not _is_rejected(match):
             emails.append(match.lower())
 
-    # Extract person names (for firstname@domain construction)
+    # Extract person names with page source
+    authority = _page_authority(page_path)
     text = soup.get_text(" ", strip=True)
     for m in PERSON_TITLE_RE.finditer(text):
         title = m.group(1)
@@ -158,9 +181,61 @@ def _extract_from_html(html: str) -> tuple:
             "first": first,
             "last": last,
             "full": f"{title} {first} {last}".strip(),
+            "found_on": page_path or "",
+            "authority": authority,
         })
 
     return emails, person_names
+
+
+def _detect_email_pattern(scraped_emails: list, domain: str) -> str:
+    """
+    Sniff the email pattern used by the business from scraped addresses.
+    Returns a pattern string we can use to construct new emails:
+      - 'first'         -> jane@domain.com
+      - 'first.last'    -> jane.smith@domain.com
+      - 'firstlast'     -> janesmith@domain.com
+      - 'f.last'        -> j.smith@domain.com
+      - 'flast'         -> jsmith@domain.com
+      - ''              -> no clear pattern
+    """
+    if not scraped_emails or not domain:
+        return ""
+    for e in scraped_emails:
+        local, _, dom = e.partition("@")
+        if not dom.endswith(domain):
+            continue
+        local = local.lower()
+        if local in GENERIC_PREFIXES:
+            continue
+        if "." in local:
+            parts = local.split(".")
+            if len(parts) == 2 and all(p.isalpha() for p in parts):
+                if len(parts[0]) == 1:
+                    return "f.last"
+                return "first.last"
+        elif local.isalpha():
+            if 2 <= len(local) <= 12:
+                # Could be "first" (jane) or "flast" (jsmith) — ambiguous
+                # Default to "first" (most common for small businesses)
+                return "first"
+    return ""
+
+
+def _build_email_from_pattern(first: str, last: str, domain: str, pattern: str) -> str:
+    first = (first or "").lower().strip()
+    last = (last or "").lower().strip()
+    if not first or not first.isalpha() or not domain:
+        return ""
+    if pattern == "first.last" and last:
+        return f"{first}.{last}@{domain}"
+    if pattern == "firstlast" and last:
+        return f"{first}{last}@{domain}"
+    if pattern == "f.last" and last:
+        return f"{first[0]}.{last}@{domain}"
+    if pattern == "flast" and last:
+        return f"{first[0]}{last}@{domain}"
+    return f"{first}@{domain}"
 
 
 def _fetch(url: str) -> str:
@@ -223,6 +298,14 @@ _NAME_STOPWORDS = {
     "inc", "corp", "agency", "firm", "practice", "clinic",
     "council", "board", "committee", "division", "department",
     "relations", "development", "marketing", "operations", "strategy",
+    # Roles/titles that get matched as name tokens (false positives)
+    "director", "manager", "associate", "analyst", "counsel", "lead",
+    "executive", "specialist", "coordinator", "administrator", "assistant",
+    "engineer", "consultant", "representative", "officer", "advisor",
+    "legal", "finance", "sales", "product", "account", "client",
+    "technical", "general", "senior", "junior", "chief", "vice",
+    "global", "regional", "national", "international", "americas",
+    "europe", "asia", "pacific",
 }
 
 
@@ -271,18 +354,40 @@ def _is_decision_title(title: str) -> bool:
     return any(kw in tl for kw in DECISION_TITLE_KEYWORDS)
 
 
+def _name_match(website_person: dict, linkedin_person: dict) -> bool:
+    """Fuzzy match a website-extracted name to a LinkedIn-found name."""
+    if not website_person or not linkedin_person:
+        return False
+    w_first = (website_person.get("first") or "").lower()
+    w_last = (website_person.get("last") or "").lower()
+    l_first = (linkedin_person.get("first") or "").lower()
+    l_last = (linkedin_person.get("last") or "").lower()
+    if not w_first or not l_first:
+        return False
+    # First name must match; last name matches if present on either side
+    if w_first != l_first:
+        return False
+    if w_last and l_last and w_last != l_last:
+        return False
+    return True
+
+
 def _pick_top_contact(scraped_emails: list, constructed_emails: list,
                       persons: list, linkedin_people: list, domain: str) -> dict:
     """
-    Rank contacts and pick the single best one.
+    Rank contacts and pick the single best one, with cross-verification.
 
-    Tier 1: Named personal email scraped from site (e.g. gavin@domain.com,
-            not info@). Highest confidence.
-    Tier 2: LinkedIn decision-maker name → constructed firstname@domain.
-            Only if domain found.
-    Tier 3: Website decision-maker name → constructed firstname@domain.
-    Tier 4: Any named person from site → constructed firstname@domain.
-    Tier 5: Generic fallback (info@, hello@).
+    Confidence tiers:
+      🟢 HIGH
+        - Named personal scraped email (gavin@domain), OR
+        - Website decision maker ON /team or /leadership page CROSS-VERIFIED by LinkedIn
+      🟡 MEDIUM
+        - Website decision maker ON /team or /leadership page (no LinkedIn match)
+        - LinkedIn decision maker (not cross-verified)
+        - Scraped email + decision-maker detected nearby
+      🔴 LOW
+        - Website person from /about or homepage only
+        - Generic inbox fallback
     """
     contact = {
         "contact_name": "",
@@ -292,14 +397,21 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
         "confidence": "",
     }
 
-    # Tier 1: Look for non-generic scraped emails (named inboxes)
+    pattern = _detect_email_pattern(scraped_emails, domain)
+
+    def build(first, last):
+        if pattern:
+            return _build_email_from_pattern(first, last, domain, pattern)
+        return f"{(first or '').lower()}@{domain}" if first else ""
+
+    # ── Tier 1a: Named personal scraped email ───────────────────────────
     for e in scraped_emails:
         local = e.partition("@")[0].lower().split(".")[0]
         if local and local not in GENERIC_PREFIXES:
             contact["contact_email"] = e
             contact["email_source"] = "scraped_mailto_or_regex"
             contact["confidence"] = "high"
-            # Try to find a matching person name
+            # Attach name if we can
             first_guess = local.split(".")[0]
             for p in (linkedin_people or []) + (persons or []):
                 if p.get("first", "").lower().startswith(first_guess[:4]):
@@ -308,52 +420,120 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
                     break
             return contact
 
-    # Tier 2: LinkedIn decision maker → constructed email
-    for p in (linkedin_people or []):
-        if _is_decision_title(p.get("title", "")) and p.get("first") and domain:
-            first = p["first"].lower()
-            last = (p.get("last") or "").lower()
-            if first and first.isalpha() and len(first) >= 2:
-                email_guess = f"{first}@{domain}"
-                contact["contact_email"] = email_guess
-                contact["contact_name"] = p.get("name", "")
-                contact["contact_title"] = p.get("title", "")
-                contact["email_source"] = "constructed_from_linkedin"
-                contact["confidence"] = "medium"
-                return contact
-
-    # Tier 3: Website decision-maker title (Owner/CEO/Founder) extracted
+    # ── Tier 1b: Website decision maker on /team page CROSS-VERIFIED ────
     for p in (persons or []):
         title = p.get("title", "")
-        if _is_decision_title(title) and p.get("first") and domain:
-            first = p["first"].lower()
-            last = (p.get("last") or "").lower()
-            if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
-                continue
-            if first and first.isalpha() and len(first) >= 3:
-                contact["contact_email"] = f"{first}@{domain}"
-                contact["contact_name"] = p.get("full", "")
-                contact["contact_title"] = title
-                contact["email_source"] = "constructed_from_website_decision_maker"
-                contact["confidence"] = "medium"
-                return contact
+        authority = p.get("authority", 0)
+        if not _is_decision_title(title):
+            continue
+        if authority < 9:  # Must be on /team /doctors /leadership
+            continue
+        first = (p.get("first") or "").lower()
+        last = (p.get("last") or "").lower()
+        if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
+            continue
+        if not (first and first.isalpha() and len(first) >= 3 and domain):
+            continue
+        # Cross-verify with LinkedIn
+        verified = any(_name_match(p, lp) for lp in (linkedin_people or []))
+        email = build(first, last)
+        if not email:
+            continue
+        contact["contact_email"] = email
+        contact["contact_name"] = p.get("full", "")
+        contact["contact_title"] = title
+        if verified:
+            contact["email_source"] = "team_page_verified_by_linkedin"
+            contact["confidence"] = "high"
+        else:
+            contact["email_source"] = "team_page_decision_maker"
+            contact["confidence"] = "medium"
+        return contact
 
-    # Tier 4: Any named person from website (e.g. Dr./Doctor — common for dental)
+    # ── Tier 2: LinkedIn decision maker CROSS-VERIFIED by website name ──
+    for lp in (linkedin_people or []):
+        if not _is_decision_title(lp.get("title", "")):
+            continue
+        first = (lp.get("first") or "").lower()
+        last = (lp.get("last") or "").lower()
+        if not (first and first.isalpha() and len(first) >= 2 and domain):
+            continue
+        verified = any(_name_match(wp, lp) for wp in (persons or []))
+        email = build(first, last)
+        if not email:
+            continue
+        contact["contact_email"] = email
+        contact["contact_name"] = lp.get("name", "")
+        contact["contact_title"] = lp.get("title", "")
+        if verified:
+            contact["email_source"] = "linkedin_verified_by_website"
+            contact["confidence"] = "high"
+        else:
+            contact["email_source"] = "constructed_from_linkedin"
+            contact["confidence"] = "medium"
+        return contact
+
+    # ── Tier 3: Website decision maker on /about or homepage ────────────
     for p in (persons or []):
-        if p.get("first") and domain:
-            first = p["first"].lower()
-            last = (p.get("last") or "").lower()
-            if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
-                continue
-            if first and first.isalpha() and len(first) >= 3:
-                contact["contact_email"] = f"{first}@{domain}"
-                contact["contact_name"] = p.get("full", "")
-                contact["contact_title"] = p.get("title", "")
-                contact["email_source"] = "constructed_from_website_name"
-                contact["confidence"] = "low"
-                return contact
+        title = p.get("title", "")
+        if not _is_decision_title(title):
+            continue
+        first = (p.get("first") or "").lower()
+        last = (p.get("last") or "").lower()
+        if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
+            continue
+        if not (first and first.isalpha() and len(first) >= 3 and domain):
+            continue
+        email = build(first, last)
+        if not email:
+            continue
+        contact["contact_email"] = email
+        contact["contact_name"] = p.get("full", "")
+        contact["contact_title"] = title
+        contact["email_source"] = "constructed_from_website_decision_maker"
+        contact["confidence"] = "medium"
+        return contact
 
-    # Tier 5: Generic fallback
+    # ── Tier 4: Any person from /team (Dr./Doctor — common for dental) ──
+    for p in (persons or []):
+        authority = p.get("authority", 0)
+        if authority < 9:  # require team/leadership page
+            continue
+        first = (p.get("first") or "").lower()
+        last = (p.get("last") or "").lower()
+        if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
+            continue
+        if not (first and first.isalpha() and len(first) >= 3 and domain):
+            continue
+        email = build(first, last)
+        if not email:
+            continue
+        contact["contact_email"] = email
+        contact["contact_name"] = p.get("full", "")
+        contact["contact_title"] = p.get("title", "")
+        contact["email_source"] = "team_page_person"
+        contact["confidence"] = "medium"
+        return contact
+
+    # ── Tier 5: Any named person from lower-authority pages ─────────────
+    for p in (persons or []):
+        first = (p.get("first") or "").lower()
+        last = (p.get("last") or "").lower()
+        if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
+            continue
+        if not (first and first.isalpha() and len(first) >= 3 and domain):
+            continue
+        email = build(first, last)
+        if not email:
+            continue
+        contact["contact_email"] = email
+        contact["contact_name"] = p.get("full", "")
+        contact["contact_title"] = p.get("title", "")
+        contact["email_source"] = "constructed_from_website_name"
+        contact["confidence"] = "low"
+        return contact
+
+    # ── Tier 6: Generic fallback ────────────────────────────────────────
     for e in scraped_emails + constructed_emails:
         contact["contact_email"] = e
         contact["email_source"] = "generic_inbox"
@@ -418,7 +598,7 @@ def scrape_business_emails(business_name: str, website: str,
         return result
     result["website_accessible"] = True
     pages_scraped += 1
-    emails, persons = _extract_from_html(homepage)
+    emails, persons = _extract_from_html(homepage, page_path="")
     all_emails.extend(emails)
     all_persons.extend(persons)
 
@@ -450,7 +630,7 @@ def scrape_business_emails(business_name: str, website: str,
         html = _fetch(url)
         if html:
             pages_scraped += 1
-            emails, persons = _extract_from_html(html)
+            emails, persons = _extract_from_html(html, page_path=path)
             all_emails.extend(emails)
             all_persons.extend(persons)
 
@@ -460,14 +640,14 @@ def scrape_business_emails(business_name: str, website: str,
     ranked = _rank_emails(all_emails, domain)
     result["scraped_emails"] = ranked
 
-    # Dedupe persons by full name
-    seen_names = set()
-    uniq_persons = []
+    # Dedupe persons by full name, keeping the highest-authority occurrence
+    seen_names = {}
     for p in all_persons:
         key = p["full"].lower()
-        if key not in seen_names:
-            seen_names.add(key)
-            uniq_persons.append(p)
+        if key not in seen_names or p.get("authority", 0) > seen_names[key].get("authority", 0):
+            seen_names[key] = p
+    # Sort by authority DESC (team page first, then about, then contact, then homepage)
+    uniq_persons = sorted(seen_names.values(), key=lambda p: -p.get("authority", 0))
     result["contact_names"] = uniq_persons[:5]
 
     # Constructed email candidates

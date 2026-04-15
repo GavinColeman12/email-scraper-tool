@@ -403,6 +403,29 @@ def override_primary_email(business_id: int, new_email: str) -> None:
         conn.close()
 
 
+def existing_place_ids() -> set:
+    """Return all place_ids already saved (across every search).
+
+    Used by the Find Businesses page to skip duplicates the next time
+    you run a search, so you never rescrape businesses you've already seen.
+    """
+    init_db()
+    conn = _connect()
+    try:
+        cur = _cursor(conn)
+        cur.execute("SELECT DISTINCT place_id FROM businesses WHERE place_id IS NOT NULL AND place_id != ''")
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    out = set()
+    for r in rows:
+        d = _row_to_dict(r) if USE_PG else {"place_id": r[0]}
+        pid = d.get("place_id")
+        if pid:
+            out.add(pid)
+    return out
+
+
 def stats(search_id: int = None) -> dict:
     init_db()
     conn = _connect()
