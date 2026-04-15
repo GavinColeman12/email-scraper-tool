@@ -38,10 +38,16 @@ REJECTED_PATTERNS = [
     r"@(sentry|cloudflare|amazonaws|googleapis|google-analytics|wixpress|squarespace|shopify|hubspot|intercom|mailchimp|sendgrid|stripe|twilio|wordpress|elementor|wp-engine)",
     r"^(example|test|demo|foo|bar|placeholder)@",
     r"@example\.(com|org|net)$",
-    r"\.(png|jpg|jpeg|gif|svg|webp|pdf|zip)@",  # emails embedded in filenames
-    r"@\d+x\d+",                                # image dimension strings
-    r"^(and|the|or|for|you|your|our|this|that|from|with|have|will|into|over)@",  # common English words
-    r"^\d+[a-z]?@",                             # starts with digit (usually IDs)
+    # File asset references accidentally matched as emails
+    r"\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|ico|bmp|tiff)@",   # email embedded in filename
+    r"@[^@]*\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|ico|bmp|tiff|css|js|json|xml)$",  # filename AFTER @
+    r"@\d+x(\.|$)",                                            # image dimension suffix like @2x.png
+    r"@\d+x\d+",                                               # image dimension strings
+    # Sprite/asset naming conventions
+    r"(sprite|asset|icon|logo|bundle|chunk|hash|placeholder)-",
+    # Common English words as prefix (false positives from page copy)
+    r"^(and|the|or|for|you|your|our|this|that|from|with|have|will|into|over)@",
+    r"^\d+[a-z]?@",                                            # starts with digit (usually IDs)
 ]
 
 # Pages to scrape for contact info (in order of priority)
@@ -120,6 +126,43 @@ def _is_rejected(email: str) -> bool:
     email_lower = email.lower()
     for pat in REJECTED_PATTERNS:
         if re.search(pat, email_lower):
+            return True
+    return False
+
+
+# Department/role keywords that, if they appear as a substring of the
+# email's local part, indicate it's a shared inbox (not a decision maker).
+# Example: `wccdcustomerservice@` -> generic, even though the full string
+# isn't in GENERIC_PREFIXES. Same for `abcsales@`, `info123@`, etc.
+GENERIC_SUBSTRINGS = (
+    "customerservice", "customercare", "customer-service", "customer_service",
+    "customersupport", "clientservice", "clientcare",
+    "billing", "accounts", "accounting",
+    "sales", "marketing", "help", "support",
+    "info", "contact", "hello", "service",
+    "reservations", "booking", "appointments",
+    "reception", "frontdesk", "front-desk",
+    "press", "media", "pr",
+    "hr", "careers", "jobs", "recruiting",
+    "feedback", "inquiries", "inquiry",
+    "noreply", "no-reply", "donotreply",
+    "webmaster", "postmaster", "admin",
+    "office", "team", "mail",
+)
+
+
+def _is_generic_inbox(email: str) -> bool:
+    """Return True if the local part contains a known department/role word."""
+    if not email or "@" not in email:
+        return True
+    local = email.partition("@")[0].lower()
+    # Exact match against GENERIC_PREFIXES
+    prefix = local.split(".")[0].split("+")[0]
+    if prefix in GENERIC_PREFIXES:
+        return True
+    # Substring match (catches wccdcustomerservice, abcsales, etc.)
+    for kw in GENERIC_SUBSTRINGS:
+        if kw in local:
             return True
     return False
 
@@ -205,9 +248,9 @@ def _detect_email_pattern(scraped_emails: list, domain: str) -> str:
         local, _, dom = e.partition("@")
         if not dom.endswith(domain):
             continue
-        local = local.lower()
-        if local in GENERIC_PREFIXES:
+        if _is_generic_inbox(e):
             continue
+        local = local.lower()
         if "." in local:
             parts = local.split(".")
             if len(parts) == 2 and all(p.isalpha() for p in parts):
@@ -271,10 +314,11 @@ def _rank_emails(emails: list, domain: str) -> list:
             continue
         seen.add(e)
         local, _, dom = e.partition("@")
-        prefix = local.lower().split(".")[0].split("+")[0]
 
         if domain and dom.endswith(domain):
-            if prefix in GENERIC_PREFIXES:
+            # Use substring-based generic check so company-prefixed dept
+            # inboxes (wccdcustomerservice@, abcsales@, etc.) also rank low
+            if _is_generic_inbox(e):
                 same_domain_generic.append(e)
             else:
                 same_domain_named.append(e)
@@ -406,9 +450,9 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
 
     # ── Tier 1a: Named personal scraped email ───────────────────────────
     for e in scraped_emails:
-        local = e.partition("@")[0].lower().split(".")[0]
-        if local and local not in GENERIC_PREFIXES:
+        if e and not _is_generic_inbox(e):
             contact["contact_email"] = e
+            local = e.partition("@")[0].lower().split(".")[0]
             contact["email_source"] = "scraped_mailto_or_regex"
             contact["confidence"] = "high"
             # Attach name if we can

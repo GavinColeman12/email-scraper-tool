@@ -39,6 +39,13 @@ c2.metric("Pending scrape", len(pending))
 c3.metric("Already scraped", len(already_scraped))
 c4.metric("No website", len(no_website))
 
+# Count enhance candidates: already-scraped but LOW or MEDIUM or blank confidence
+enhance_candidates = [
+    b for b in already_scraped
+    if b.get("website")
+    and (b.get("confidence") or "") in ("", "low", "medium")
+]
+
 st.caption(
     "💡 Scraping is free — just web requests. Each business fetches ~8 pages "
     "(homepage + contact/about/team) and extracts emails via regex + mailto: links."
@@ -75,6 +82,79 @@ if deep_mode:
         f"💰 Deep research estimated cost: **${total_est:.2f}** for {len(pending)} businesses "
         f"(~${est_cost_per:.3f}/business)"
     )
+
+# ── Enhance existing results with Claude ──
+st.markdown("### 🧠 Enhance existing results with Claude AI")
+st.caption(
+    f"Re-runs the multi-agent pipeline + Claude synthesizer on the **{len(enhance_candidates)}** "
+    f"already-scraped businesses that are currently LOW, MEDIUM, or blank confidence. "
+    f"Skips HIGH-confidence ones (no point enhancing what's already good). "
+    f"Cost: ~${len(enhance_candidates) * 0.02:.2f} at ~$0.02/business."
+)
+
+if not has_claude:
+    st.caption("⚠️ `ANTHROPIC_API_KEY` not set — enhance will use rules-based synthesizer (still better than basic mode, but no AI).")
+
+if st.button(
+    f"🧠 Enhance {len(enhance_candidates)} low/medium/blank businesses with Claude",
+    disabled=not enhance_candidates,
+    type="secondary",
+):
+    e_prog = st.progress(0)
+    e_status = st.empty()
+    e_results_preview = st.empty()
+    upgraded = 0
+    unchanged = 0
+    e_upgrades = []
+
+    CONFIDENCE_RANK = {"": 0, "low": 1, "medium": 2, "high": 3}
+
+    def _enhance_one(biz):
+        addr = biz.get("address", "") or biz.get("location", "")
+        city = addr.split(",")[0].strip() if addr else ""
+        result = deep_scrape_business_emails(
+            business_name=biz["business_name"],
+            website=biz.get("website", ""),
+            location=city,
+            verify_with_mx=True,
+        )
+        storage.update_business_emails(biz["id"], result)
+        return biz, result
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = [ex.submit(_enhance_one, b) for b in enhance_candidates]
+        for i, fut in enumerate(as_completed(futures)):
+            try:
+                biz, result = fut.result()
+            except Exception as e:
+                biz, result = {"business_name": "?", "confidence": "", "primary_email": ""}, {"confidence": ""}
+                st.write(f"⚠️ Error: {e}")
+            old_conf = (biz.get("confidence") or "")
+            new_conf = (result.get("confidence") or "")
+            if CONFIDENCE_RANK.get(new_conf, 0) > CONFIDENCE_RANK.get(old_conf, 0):
+                upgraded += 1
+                e_upgrades.append({
+                    "Business": biz.get("business_name"),
+                    "Before": f"{old_conf or '—'} / {biz.get('primary_email') or '—'}",
+                    "After": f"{new_conf} / {result.get('primary_email', '')}",
+                    "Reasoning": (result.get("synthesis_reasoning", "") or "")[:100],
+                })
+            else:
+                unchanged += 1
+            e_prog.progress((i + 1) / len(enhance_candidates))
+            e_status.write(
+                f"**{i + 1}/{len(enhance_candidates)}** · {biz.get('business_name')} → "
+                f"{old_conf or '—'} → **{new_conf or '—'}** · {result.get('primary_email', '')}"
+            )
+
+    e_prog.empty()
+    e_status.success(f"✅ Enhanced — **{upgraded}** upgraded, **{unchanged}** unchanged")
+    if e_upgrades:
+        st.markdown("#### Upgrades")
+        st.dataframe(pd.DataFrame(e_upgrades), use_container_width=True, hide_index=True)
+    st.rerun()
+
+st.divider()
 
 # ── Bulk scrape ──
 if st.button(f"▶️ Scrape {len(pending)} pending businesses",
