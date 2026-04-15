@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS businesses (
     scraped_emails_json TEXT,
     constructed_emails_json TEXT,
     contact_name TEXT,
+    contact_title TEXT,
+    email_source TEXT,
+    confidence TEXT,
     email_status TEXT,
     email_verification_reason TEXT,
     scraped_at TIMESTAMP,
@@ -116,6 +119,9 @@ CREATE TABLE IF NOT EXISTS businesses (
     scraped_emails_json TEXT,
     constructed_emails_json TEXT,
     contact_name TEXT,
+    contact_title TEXT,
+    email_source TEXT,
+    confidence TEXT,
     email_status TEXT,
     email_verification_reason TEXT,
     scraped_at TIMESTAMP,
@@ -145,6 +151,20 @@ def init_db() -> None:
         else:
             conn.executescript(SCHEMA_SQLITE)
         conn.commit()
+        # Idempotent migrations for existing deployments
+        for col, typ in [
+            ("contact_title", "TEXT"),
+            ("email_source", "TEXT"),
+            ("confidence", "TEXT"),
+        ]:
+            try:
+                if USE_PG:
+                    cur.execute(f"ALTER TABLE businesses ADD COLUMN IF NOT EXISTS {col} {typ}")
+                else:
+                    cur.execute(f"ALTER TABLE businesses ADD COLUMN {col} {typ}")
+                conn.commit()
+            except Exception:
+                conn.rollback() if USE_PG else None
         _INITIALIZED = True
     finally:
         conn.close()
@@ -316,8 +336,10 @@ def _parse(row) -> dict:
 
 def update_business_emails(business_id: int, scrape_result: dict) -> None:
     init_db()
-    contact = ""
-    if scrape_result.get("contact_names"):
+    # Prefer the top-contact name from new-style result; fall back to
+    # first website-extracted name for backward compat.
+    contact = scrape_result.get("contact_name", "")
+    if not contact and scrape_result.get("contact_names"):
         contact = (scrape_result["contact_names"][0] or {}).get("full", "")
     conn = _connect()
     try:
@@ -328,6 +350,9 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
                 scraped_emails_json = {_PARAM},
                 constructed_emails_json = {_PARAM},
                 contact_name = {_PARAM},
+                contact_title = {_PARAM},
+                email_source = {_PARAM},
+                confidence = {_PARAM},
                 scraped_at = {_PARAM}
             WHERE id = {_PARAM}
         """
@@ -336,6 +361,9 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
             json.dumps(scrape_result.get("scraped_emails", [])),
             json.dumps(scrape_result.get("constructed_emails", [])),
             contact,
+            scrape_result.get("contact_title", ""),
+            scrape_result.get("email_source", ""),
+            scrape_result.get("confidence", ""),
             datetime.utcnow().isoformat(),
             business_id,
         ))

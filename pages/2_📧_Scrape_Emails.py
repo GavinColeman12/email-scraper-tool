@@ -50,9 +50,14 @@ if st.button(f"▶️ Scrape {len(pending)} pending businesses",
     results_preview = st.empty()
 
     def _scrape_one(biz):
+        # Parse city from address for more targeted LinkedIn search
+        addr = biz.get("address", "") or biz.get("location", "")
+        city = addr.split(",")[0].strip() if addr else ""
         result = scrape_business_emails(
             business_name=biz["business_name"],
             website=biz.get("website", ""),
+            find_decision_makers=True,
+            location=city,
         )
         storage.update_business_emails(biz["id"], result)
         return biz, result
@@ -127,18 +132,30 @@ def matches(b):
 filtered = [b for b in businesses if matches(b)]
 
 rows = []
+CONFIDENCE_EMOJI = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+SOURCE_LABEL = {
+    "scraped_mailto_or_regex": "🎯 scraped",
+    "constructed_from_linkedin": "👔 LinkedIn",
+    "constructed_from_website_decision_maker": "🏢 site (owner)",
+    "constructed_from_website_name": "👤 site (name)",
+    "generic_inbox": "📬 generic",
+}
 for b in filtered:
     scraped_emails = b.get("scraped_emails") or []
-    constructed = b.get("constructed_emails") or []
-    source = "—"
-    if b.get("primary_email"):
+    src_raw = b.get("email_source") or ""
+    source = SOURCE_LABEL.get(src_raw, "—")
+    if not src_raw and b.get("primary_email"):
         source = "🎯 scraped" if b["primary_email"] in scraped_emails else "🤔 pattern"
+    confidence = b.get("confidence") or ""
+    conf_display = f"{CONFIDENCE_EMOJI.get(confidence, '')} {confidence}".strip() or "—"
     rows.append({
         "id": b["id"],
         "Name": b["business_name"],
         "Email": b.get("primary_email") or "",
         "Source": source,
+        "Confidence": conf_display,
         "Contact": b.get("contact_name") or "—",
+        "Title": b.get("contact_title") or "—",
         "All scraped": ", ".join(scraped_emails[:3]) if scraped_emails else "—",
         "Website": b.get("website") or "—",
         "Status": b.get("email_status") or "not verified",

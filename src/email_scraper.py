@@ -20,11 +20,17 @@ EMAIL_RE = re.compile(
     r"(?![a-zA-Z0-9._%+-])"                           # no word char after
 )
 
-# Addresses to deprioritize (usually shared inboxes)
+# Addresses to deprioritize (usually shared inboxes, not decision makers)
 GENERIC_PREFIXES = {
     "info", "support", "noreply", "no-reply", "hello", "admin",
     "webmaster", "postmaster", "help", "sales", "contact",
     "office", "team", "feedback", "inquiries", "mail",
+    "customer_service", "customerservice", "customer-service",
+    "customercare", "customer", "service", "care", "billing",
+    "accounts", "accounting", "press", "media", "pr", "hr",
+    "careers", "jobs", "marketing", "orders", "booking",
+    "reservations", "reception", "frontdesk", "front-desk",
+    "appointments",
 }
 
 # Addresses to reject entirely (CDN/service emails, not the business)
@@ -58,11 +64,22 @@ CONTACT_PATHS = [
 ]
 
 # Look for doctor/owner names on the page (for drname@ pattern construction)
+# Expanded to include more decision-maker titles
 PERSON_TITLE_RE = re.compile(
-    r"\b(Dr\.?|Doctor|Attorney|CEO|Owner|Founder|Principal)\s+"
+    r"\b(Dr\.?|Doctor|Attorney|Lawyer|CEO|Owner|Founder|Co-?Founder|"
+    r"President|Managing\s+Partner|Managing\s+Director|Principal|Partner|"
+    r"Director|DDS|DMD|MD)\s+"
     r"([A-Z][a-zA-Z\-']+)(?:\s+([A-Z][a-zA-Z\-']+))?",
     re.IGNORECASE,
 )
+
+# Decision-maker title words — used to rank which extracted person is
+# most likely the decision maker.
+DECISION_TITLE_KEYWORDS = {
+    "owner", "ceo", "chief executive", "founder", "co-founder", "cofounder",
+    "president", "managing partner", "managing director", "principal",
+    "practice owner", "partner",
+}
 
 HEADERS = {
     "User-Agent": (
@@ -193,12 +210,19 @@ def _rank_emails(emails: list, domain: str) -> list:
 
 
 # Common English stopwords that get mistaken for names when PERSON_TITLE_RE
-# sees patterns like "Owner And Operator" or "Dr. The Best"
+# sees patterns like "Owner And Operator" or "Partner Network Community"
 _NAME_STOPWORDS = {
+    # Generic English
     "and", "or", "the", "our", "your", "his", "her", "their",
     "for", "with", "from", "this", "that", "than", "then",
     "also", "plus", "new", "all", "any", "both", "each",
     "is", "was", "are", "were", "be", "been",
+    # Business/org words that follow title keywords
+    "network", "services", "team", "group", "community", "program",
+    "solutions", "partners", "networks", "office", "company", "llc",
+    "inc", "corp", "agency", "firm", "practice", "clinic",
+    "council", "board", "committee", "division", "department",
+    "relations", "development", "marketing", "operations", "strategy",
 }
 
 
@@ -240,15 +264,123 @@ def _construct_patterns(domain: str, person: dict = None) -> list:
     return candidates
 
 
-def scrape_business_emails(business_name: str, website: str,
-                           include_constructed: bool = True) -> dict:
+def _is_decision_title(title: str) -> bool:
+    if not title:
+        return False
+    tl = title.lower()
+    return any(kw in tl for kw in DECISION_TITLE_KEYWORDS)
+
+
+def _pick_top_contact(scraped_emails: list, constructed_emails: list,
+                      persons: list, linkedin_people: list, domain: str) -> dict:
     """
-    Scrape emails from a business website. Returns:
+    Rank contacts and pick the single best one.
+
+    Tier 1: Named personal email scraped from site (e.g. gavin@domain.com,
+            not info@). Highest confidence.
+    Tier 2: LinkedIn decision-maker name → constructed firstname@domain.
+            Only if domain found.
+    Tier 3: Website decision-maker name → constructed firstname@domain.
+    Tier 4: Any named person from site → constructed firstname@domain.
+    Tier 5: Generic fallback (info@, hello@).
+    """
+    contact = {
+        "contact_name": "",
+        "contact_title": "",
+        "contact_email": "",
+        "email_source": "",
+        "confidence": "",
+    }
+
+    # Tier 1: Look for non-generic scraped emails (named inboxes)
+    for e in scraped_emails:
+        local = e.partition("@")[0].lower().split(".")[0]
+        if local and local not in GENERIC_PREFIXES:
+            contact["contact_email"] = e
+            contact["email_source"] = "scraped_mailto_or_regex"
+            contact["confidence"] = "high"
+            # Try to find a matching person name
+            first_guess = local.split(".")[0]
+            for p in (linkedin_people or []) + (persons or []):
+                if p.get("first", "").lower().startswith(first_guess[:4]):
+                    contact["contact_name"] = p.get("name") or p.get("full", "")
+                    contact["contact_title"] = p.get("title", "")
+                    break
+            return contact
+
+    # Tier 2: LinkedIn decision maker → constructed email
+    for p in (linkedin_people or []):
+        if _is_decision_title(p.get("title", "")) and p.get("first") and domain:
+            first = p["first"].lower()
+            last = (p.get("last") or "").lower()
+            if first and first.isalpha() and len(first) >= 2:
+                email_guess = f"{first}@{domain}"
+                contact["contact_email"] = email_guess
+                contact["contact_name"] = p.get("name", "")
+                contact["contact_title"] = p.get("title", "")
+                contact["email_source"] = "constructed_from_linkedin"
+                contact["confidence"] = "medium"
+                return contact
+
+    # Tier 3: Website decision-maker title (Owner/CEO/Founder) extracted
+    for p in (persons or []):
+        title = p.get("title", "")
+        if _is_decision_title(title) and p.get("first") and domain:
+            first = p["first"].lower()
+            last = (p.get("last") or "").lower()
+            if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
+                continue
+            if first and first.isalpha() and len(first) >= 3:
+                contact["contact_email"] = f"{first}@{domain}"
+                contact["contact_name"] = p.get("full", "")
+                contact["contact_title"] = title
+                contact["email_source"] = "constructed_from_website_decision_maker"
+                contact["confidence"] = "medium"
+                return contact
+
+    # Tier 4: Any named person from website (e.g. Dr./Doctor — common for dental)
+    for p in (persons or []):
+        if p.get("first") and domain:
+            first = p["first"].lower()
+            last = (p.get("last") or "").lower()
+            if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
+                continue
+            if first and first.isalpha() and len(first) >= 3:
+                contact["contact_email"] = f"{first}@{domain}"
+                contact["contact_name"] = p.get("full", "")
+                contact["contact_title"] = p.get("title", "")
+                contact["email_source"] = "constructed_from_website_name"
+                contact["confidence"] = "low"
+                return contact
+
+    # Tier 5: Generic fallback
+    for e in scraped_emails + constructed_emails:
+        contact["contact_email"] = e
+        contact["email_source"] = "generic_inbox"
+        contact["confidence"] = "low"
+        return contact
+
+    return contact
+
+
+def scrape_business_emails(business_name: str, website: str,
+                           include_constructed: bool = True,
+                           find_decision_makers: bool = True,
+                           location: str = "") -> dict:
+    """
+    Scrape emails from a business website + find decision makers via LinkedIn.
+
+    Returns:
     {
-        "scraped_emails": [...],          # actually found on website
+        "scraped_emails": [...],          # found on website
         "constructed_emails": [...],      # pattern-based guesses
-        "contact_names": [...],           # doctor/owner names found
-        "primary_email": "..."            # best guess (highest-ranked)
+        "contact_names": [...],           # website-extracted names
+        "linkedin_people": [...],         # LinkedIn decision makers
+        "primary_email": "..."            # single best email
+        "contact_name": "...",            # decision maker's name (if found)
+        "contact_title": "...",           # their title
+        "email_source": "...",            # where the email came from
+        "confidence": "high|medium|low",  # our confidence in this email
         "website_accessible": bool,
         "pages_scraped": int,
     }
@@ -259,7 +391,12 @@ def scrape_business_emails(business_name: str, website: str,
         "scraped_emails": [],
         "constructed_emails": [],
         "contact_names": [],
+        "linkedin_people": [],
         "primary_email": "",
+        "contact_name": "",
+        "contact_title": "",
+        "email_source": "",
+        "confidence": "",
         "website_accessible": False,
         "pages_scraped": 0,
     }
@@ -345,10 +482,28 @@ def scrape_business_emails(business_name: str, website: str,
         constructed = [c for c in dict.fromkeys(constructed) if c not in scraped_set]
         result["constructed_emails"] = constructed[:8]
 
-    # Primary email = best scraped, or first constructed
-    if ranked:
-        result["primary_email"] = ranked[0]
-    elif result["constructed_emails"]:
-        result["primary_email"] = result["constructed_emails"][0]
+    # LinkedIn decision-maker lookup (1 SearchApi credit per business)
+    linkedin_people = []
+    if find_decision_makers and business_name:
+        try:
+            from src.people_finder import find_decision_makers as _find_dm
+            linkedin_people = _find_dm(business_name, location) or []
+        except Exception:
+            linkedin_people = []
+    result["linkedin_people"] = linkedin_people
+
+    # Pick the single best contact (name + email + source + confidence)
+    top = _pick_top_contact(
+        scraped_emails=ranked,
+        constructed_emails=result["constructed_emails"],
+        persons=uniq_persons,
+        linkedin_people=linkedin_people,
+        domain=domain,
+    )
+    result["primary_email"] = top["contact_email"]
+    result["contact_name"] = top["contact_name"]
+    result["contact_title"] = top["contact_title"]
+    result["email_source"] = top["email_source"]
+    result["confidence"] = top["confidence"]
 
     return result

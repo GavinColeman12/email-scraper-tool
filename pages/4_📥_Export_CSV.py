@@ -82,7 +82,6 @@ if filtered:
     for b in filtered:
         email = b.get("primary_email", "")
         contact_name = b.get("contact_name", "")
-        # Split "Dr. Gloria Espinoza" into name components if needed
         export_rows.append({
             "Business Name": b.get("business_name", ""),
             "Business Type": b.get("business_type", ""),
@@ -91,7 +90,9 @@ if filtered:
             "Website": b.get("website", ""),
             "Email": email,
             "Contact Name": contact_name,
-            "Contact Title": "",
+            "Contact Title": b.get("contact_title", ""),
+            "Email Source": b.get("email_source", ""),
+            "Confidence": b.get("confidence", ""),
             "Rating": b.get("rating", ""),
             "Review Count": b.get("review_count", ""),
             "Place ID": b.get("place_id", ""),
