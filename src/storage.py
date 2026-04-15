@@ -156,6 +156,8 @@ def init_db() -> None:
             ("contact_title", "TEXT"),
             ("email_source", "TEXT"),
             ("confidence", "TEXT"),
+            ("reasoning", "TEXT"),
+            ("synthesizer", "TEXT"),
         ]:
             try:
                 if USE_PG:
@@ -353,6 +355,8 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
                 contact_title = {_PARAM},
                 email_source = {_PARAM},
                 confidence = {_PARAM},
+                reasoning = {_PARAM},
+                synthesizer = {_PARAM},
                 scraped_at = {_PARAM}
             WHERE id = {_PARAM}
         """
@@ -364,6 +368,8 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
             scrape_result.get("contact_title", ""),
             scrape_result.get("email_source", ""),
             scrape_result.get("confidence", ""),
+            scrape_result.get("synthesis_reasoning", ""),
+            scrape_result.get("synthesizer", ""),
             datetime.utcnow().isoformat(),
             business_id,
         ))

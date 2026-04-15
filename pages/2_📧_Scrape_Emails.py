@@ -9,6 +9,8 @@ import streamlit as st
 
 from src import storage
 from src.email_scraper import scrape_business_emails
+from src.deep_scraper import deep_scrape_business_emails
+from src.secrets import get_secret
 
 st.set_page_config(page_title="Scrape Emails", page_icon="📧", layout="wide")
 st.title("📧 Scrape Business Websites for Emails")
@@ -42,6 +44,38 @@ st.caption(
     "(homepage + contact/about/team) and extracts emails via regex + mailto: links."
 )
 
+# ── Deep research toggle ──
+try:
+    has_claude = bool(get_secret("ANTHROPIC_API_KEY"))
+except Exception:
+    has_claude = False
+
+st.markdown("### Research mode")
+mode_col1, mode_col2 = st.columns([3, 2])
+with mode_col1:
+    deep_mode = st.checkbox(
+        "🧠 **Deep research mode** (multi-agent + AI synthesis)",
+        value=False,
+        help="Runs 4 research agents in parallel (website, schema.org, LinkedIn, "
+             "press/news search) then uses Claude AI to pick the best decision-maker "
+             "email with reasoning. Much higher accuracy. Costs ~$0.02/business "
+             "(1 extra SearchApi call + Claude Sonnet call)."
+    )
+with mode_col2:
+    if deep_mode:
+        if has_claude:
+            st.caption("✅ Claude Sonnet synthesizer enabled")
+        else:
+            st.caption("⚠️ No `ANTHROPIC_API_KEY` — will use rules-based synthesizer (free but less accurate)")
+
+if deep_mode:
+    est_cost_per = 0.02 if has_claude else 0.005
+    total_est = len(pending) * est_cost_per
+    st.info(
+        f"💰 Deep research estimated cost: **${total_est:.2f}** for {len(pending)} businesses "
+        f"(~${est_cost_per:.3f}/business)"
+    )
+
 # ── Bulk scrape ──
 if st.button(f"▶️ Scrape {len(pending)} pending businesses",
               disabled=not pending, type="primary"):
@@ -53,18 +87,27 @@ if st.button(f"▶️ Scrape {len(pending)} pending businesses",
         # Parse city from address for more targeted LinkedIn search
         addr = biz.get("address", "") or biz.get("location", "")
         city = addr.split(",")[0].strip() if addr else ""
-        result = scrape_business_emails(
-            business_name=biz["business_name"],
-            website=biz.get("website", ""),
-            find_decision_makers=True,
-            location=city,
-        )
+        if deep_mode:
+            result = deep_scrape_business_emails(
+                business_name=biz["business_name"],
+                website=biz.get("website", ""),
+                location=city,
+                verify_with_mx=True,
+            )
+        else:
+            result = scrape_business_emails(
+                business_name=biz["business_name"],
+                website=biz.get("website", ""),
+                find_decision_makers=True,
+                location=city,
+            )
         storage.update_business_emails(biz["id"], result)
         return biz, result
 
     completed = 0
     scraped_so_far = []
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    max_workers = 4 if deep_mode else 8
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_scrape_one, b) for b in pending]
         for fut in as_completed(futures):
             try:
@@ -135,10 +178,21 @@ rows = []
 CONFIDENCE_EMOJI = {"high": "🟢", "medium": "🟡", "low": "🔴"}
 SOURCE_LABEL = {
     "scraped_mailto_or_regex": "🎯 scraped",
+    "scraped_personal_email": "🎯 scraped",
     "constructed_from_linkedin": "👔 LinkedIn",
     "constructed_from_website_decision_maker": "🏢 site (owner)",
+    "team_page_decision_maker": "🏢 team page",
+    "team_page_verified_by_linkedin": "✅ cross-verified",
+    "linkedin_verified_by_website": "✅ cross-verified",
+    "team_page_person": "🏢 team",
     "constructed_from_website_name": "👤 site (name)",
     "generic_inbox": "📬 generic",
+    "generic_fallback": "📬 generic",
+    "website_cross_verified": "✅ cross-verified",
+    "press_cross_verified": "✅ press + verified",
+    "schema": "🏷️ schema.org",
+    "press": "📰 press",
+    "linkedin": "👔 LinkedIn",
 }
 for b in filtered:
     scraped_emails = b.get("scraped_emails") or []
@@ -165,6 +219,21 @@ if rows:
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True,
                  column_config={"id": None, "Website": st.column_config.LinkColumn()})
+
+    # Show reasoning for any deeply-researched businesses
+    deep_researched = [b for b in filtered if b.get("reasoning")]
+    if deep_researched:
+        with st.expander(f"🧠 AI reasoning for {len(deep_researched)} deeply-researched businesses"):
+            for b in deep_researched[:20]:
+                synth = b.get("synthesizer", "rules")
+                icon = "🤖" if synth == "claude" else "⚙️"
+                st.markdown(
+                    f"{icon} **{b['business_name']}** → `{b.get('primary_email', '')}` "
+                    f"(*{b.get('confidence', '')}*)  \n"
+                    f"<span style='color:#666;font-size:0.9em'>{b.get('reasoning', '')}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.divider()
 else:
     st.info("No businesses match the current filter.")
 

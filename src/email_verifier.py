@@ -27,6 +27,23 @@ STATUS_DISPOSABLE = "disposable"
 # MX cache to avoid re-resolving the same domain
 _mx_cache = {}
 
+# Catch-all detection cache — domains where MX accepts any mailbox
+# (makes all constructed emails unreliable). ZeroBounce catches this but
+# it's paid; we can estimate by checking if the MX server accepts a
+# random prefix at the SMTP layer. For now we just flag known catch-all
+# providers.
+KNOWN_CATCHALL_PROVIDERS = {
+    # Shared hosting / forwarders that often catch-all
+    "privateemail.com", "mail.privateemail.com",
+    "fwd.bluehost.com", "bluehost.com",
+}
+
+
+def is_known_catchall_mx(mx_host: str) -> bool:
+    """Return True if the MX host is a known catch-all provider."""
+    host = (mx_host or "").lower().rstrip(".")
+    return any(host.endswith(p) for p in KNOWN_CATCHALL_PROVIDERS)
+
 
 def _domain_of(email: str) -> str:
     m = EMAIL_RE.match(email)
