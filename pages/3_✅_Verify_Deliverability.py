@@ -8,7 +8,9 @@ import pandas as pd
 import streamlit as st
 
 from src import storage
-from src.email_verifier import verify_email, STATUS_VALID, STATUS_INVALID, STATUS_UNKNOWN
+from src.email_verifier import (
+    verify_email, verify_smtp, STATUS_VALID, STATUS_INVALID, STATUS_UNKNOWN,
+)
 from src.secrets import get_secret
 
 st.set_page_config(page_title="Verify Deliverability", page_icon="✅", layout="wide")
@@ -37,8 +39,12 @@ c3.metric("Already verified", len(businesses) - len(to_verify))
 # ── Verification mode ──
 st.subheader("Verification mode")
 
-zb_key_present = bool(get_secret("ZEROBOUNCE_API_KEY"))
-mode_options = ["free_mx_only"]
+try:
+    zb_key_present = bool(get_secret("ZEROBOUNCE_API_KEY"))
+except Exception:
+    zb_key_present = False
+
+mode_options = ["free_mx_only", "free_smtp"]
 if zb_key_present:
     mode_options.extend(["paid_only", "hybrid"])
 
@@ -46,20 +52,29 @@ mode = st.radio(
     "Mode",
     mode_options,
     format_func=lambda k: {
-        "free_mx_only": "🆓 Free — MX record check only (fast, catches ~80% of dead emails)",
-        "hybrid": "💰 Hybrid — MX first, ZeroBounce only for MX-passing (recommended if paid)",
-        "paid_only": "💰 Paid only — ZeroBounce for every email (most accurate, most expensive)",
+        "free_mx_only": "🆓 MX only — checks domain exists (fast, catches dead domains)",
+        "free_smtp": "🆓 MX + SMTP — checks the actual MAILBOX exists (slower but catches bounces like 'address not found')",
+        "hybrid": "💰 Hybrid — MX + SMTP + ZeroBounce for remaining unknowns",
+        "paid_only": "💰 Paid only — ZeroBounce for every email (most accurate)",
     }[k],
     horizontal=False,
+    index=1,  # default to SMTP since it's free and catches the bounces
 )
 
+if mode == "free_smtp":
+    st.caption(
+        "✅ **Recommended** — SMTP verification connects to the mail server and checks if the "
+        "specific mailbox exists. Catches 'address not found' bounces that MX-only misses. "
+        "Free but slower (~5 sec/email). Also detects catch-all domains."
+    )
 if not zb_key_present:
     st.caption(
-        "💡 To enable paid ZeroBounce verification (~$0.007/email, ~95% accuracy), "
-        "add `ZEROBOUNCE_API_KEY` to your `.env` file."
+        "💡 To enable ZeroBounce (~$0.007/email, ~95% accuracy), "
+        "add `ZEROBOUNCE_API_KEY` to your `.env` or Streamlit Cloud secrets."
     )
 
 paid_check = mode in ("paid_only", "hybrid")
+smtp_check = mode in ("free_smtp", "hybrid")
 
 if mode == "paid_only":
     est_cost = len(to_verify) * 0.007
@@ -79,7 +94,20 @@ if st.button(f"▶️ Verify {len(to_verify)} emails",
         email = biz.get("primary_email", "")
         if not email:
             return biz, {"status": STATUS_UNKNOWN, "reason": "no email"}
+
+        # Step 1: MX check (always, fast)
         result = verify_email(email, paid_check=paid_check)
+
+        # Step 2: SMTP mailbox check (if enabled and MX passed)
+        if smtp_check and result.get("status") == STATUS_VALID:
+            smtp_result = verify_smtp(email, timeout=10)
+            if smtp_result["status"] == STATUS_INVALID:
+                # Mailbox doesn't exist — override MX result
+                result = smtp_result
+            elif smtp_result["status"] == "risky":
+                result["status"] = "risky"
+                result["reason"] = smtp_result["reason"]
+
         storage.update_business_verification(
             biz["id"], result.get("status", STATUS_UNKNOWN),
             result.get("reason", ""),

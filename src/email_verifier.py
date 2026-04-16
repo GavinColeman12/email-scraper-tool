@@ -117,6 +117,187 @@ def verify_mx(email: str) -> dict:
     return result
 
 
+# ── SMTP RCPT TO verification (free, catches bad mailboxes) ──────────
+
+_smtp_cache = {}  # domain -> {"is_catchall": bool, "mx_host": str}
+
+
+def _get_mx_host(domain: str) -> str:
+    """Resolve the primary MX host for a domain."""
+    try:
+        answers = dns.resolver.resolve(domain, "MX", lifetime=5)
+        # Pick lowest-preference MX (primary)
+        best = min(answers, key=lambda r: r.preference)
+        return str(best.exchange).rstrip(".")
+    except Exception:
+        return ""
+
+
+def verify_smtp(email: str, timeout: int = 10) -> dict:
+    """
+    Connect to the recipient's mail server and check if the specific
+    mailbox exists using SMTP RCPT TO. This is FREE and catches exactly
+    the 'address not found' bounces that MX-only verification misses.
+
+    Returns {"status": valid|invalid|unknown, "method": "smtp", ...}
+
+    Caveats:
+    - Some servers (Google Workspace) always accept RCPT TO (catch-all)
+    - Some servers block this probe; we return 'unknown' in that case
+    - Takes 3-8 seconds per check due to SMTP handshake
+    """
+    import smtplib
+    import socket
+
+    result = {
+        "email": email,
+        "status": STATUS_UNKNOWN,
+        "reason": "",
+        "method": "smtp",
+        "is_catchall": False,
+    }
+
+    domain = _domain_of(email)
+    if not domain:
+        result["status"] = STATUS_INVALID
+        result["reason"] = "Invalid email format"
+        return result
+
+    # Get MX host
+    mx_host = _get_mx_host(domain)
+    if not mx_host:
+        result["status"] = STATUS_INVALID
+        result["reason"] = "No MX host found"
+        return result
+
+    try:
+        # Connect to SMTP server
+        smtp = smtplib.SMTP(timeout=timeout)
+        smtp.connect(mx_host, 25)
+        smtp.helo("verify.local")
+
+        # First check if domain is catch-all by probing a random address
+        if domain not in _smtp_cache:
+            import uuid
+            random_addr = f"verify-{uuid.uuid4().hex[:8]}@{domain}"
+            code_random, _ = smtp.rcpt(random_addr)
+            is_catchall = (code_random == 250)
+            _smtp_cache[domain] = {"is_catchall": is_catchall, "mx_host": mx_host}
+        else:
+            is_catchall = _smtp_cache[domain]["is_catchall"]
+
+        if is_catchall:
+            result["status"] = STATUS_RISKY
+            result["reason"] = "Domain is catch-all (accepts any address)"
+            result["is_catchall"] = True
+            smtp.quit()
+            return result
+
+        # Probe the actual email address
+        code, msg = smtp.rcpt(email)
+        smtp.quit()
+
+        if code == 250:
+            result["status"] = STATUS_VALID
+            result["reason"] = "Mailbox exists (SMTP verified)"
+        elif code == 550 or code == 551 or code == 553:
+            result["status"] = STATUS_INVALID
+            result["reason"] = f"Mailbox does not exist (SMTP {code})"
+        elif code == 452 or code == 421:
+            result["status"] = STATUS_UNKNOWN
+            result["reason"] = f"Server busy/rate-limited (SMTP {code})"
+        else:
+            result["status"] = STATUS_UNKNOWN
+            result["reason"] = f"SMTP response {code}"
+
+    except smtplib.SMTPServerDisconnected:
+        result["status"] = STATUS_UNKNOWN
+        result["reason"] = "Server disconnected (may block verification)"
+    except smtplib.SMTPConnectError:
+        result["status"] = STATUS_UNKNOWN
+        result["reason"] = "Could not connect to mail server"
+    except socket.timeout:
+        result["status"] = STATUS_UNKNOWN
+        result["reason"] = "SMTP timeout"
+    except Exception as e:
+        result["status"] = STATUS_UNKNOWN
+        result["reason"] = f"SMTP error: {type(e).__name__}"
+
+    return result
+
+
+def verify_smtp_patterns(first: str, last: str, domain: str,
+                          timeout: int = 10) -> dict:
+    """
+    Try multiple email patterns and return the first one that SMTP-verifies
+    as valid. If none verify, return the most common pattern.
+
+    This is what catches the bounces: instead of guessing 'amy.morgan@',
+    we try 'amy@', 'amy.morgan@', 'amorgan@', 'a.morgan@', 'morgan@'
+    and keep the one the mail server accepts.
+
+    Returns {"email": "winning@pattern", "status": ..., "patterns_tried": int}
+    """
+    first = (first or "").lower().strip()
+    last = (last or "").lower().strip()
+
+    if not first or not domain:
+        return {"email": "", "status": STATUS_UNKNOWN, "patterns_tried": 0}
+
+    # Generate candidate patterns (most common first)
+    candidates = []
+    if last:
+        candidates = [
+            f"{first}@{domain}",
+            f"{first}.{last}@{domain}",
+            f"{first[0]}{last}@{domain}",
+            f"{first}{last}@{domain}",
+            f"{first[0]}.{last}@{domain}",
+            f"{last}@{domain}",
+        ]
+    else:
+        candidates = [f"{first}@{domain}"]
+
+    # Dedupe preserving order
+    seen = set()
+    unique = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+
+    best = None
+    for email in unique:
+        result = verify_smtp(email, timeout=timeout)
+        if result["status"] == STATUS_VALID:
+            return {
+                "email": email,
+                "status": STATUS_VALID,
+                "reason": result["reason"],
+                "patterns_tried": unique.index(email) + 1,
+                "method": "smtp_pattern",
+            }
+        if result.get("is_catchall"):
+            # Catch-all domain — can't verify, return first pattern
+            return {
+                "email": unique[0],
+                "status": STATUS_RISKY,
+                "reason": "Domain is catch-all — cannot verify specific mailbox",
+                "patterns_tried": unique.index(email) + 1,
+                "method": "smtp_pattern",
+            }
+        if best is None:
+            best = {"email": email, "status": result["status"],
+                    "reason": result["reason"], "method": "smtp_pattern"}
+
+    # None verified — return first pattern with unknown status
+    if best:
+        best["patterns_tried"] = len(unique)
+        return best
+    return {"email": unique[0] if unique else "", "status": STATUS_UNKNOWN,
+            "patterns_tried": len(unique), "method": "smtp_pattern"}
+
+
 def verify_zerobounce(email: str) -> dict:
     """
     Use ZeroBounce API to verify an email. Requires ZEROBOUNCE_API_KEY in .env.
