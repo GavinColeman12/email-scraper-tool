@@ -71,6 +71,22 @@ if submitted:
                         f"🧹 Skipped **{skipped}** businesses already in your database — "
                         f"showing **{len(results)}** new ones (of {total_found} found)."
                     )
+
+            # If we returned significantly fewer than the user asked for,
+            # tell them why + how to get more
+            if total_found < max_results * 0.6:
+                st.warning(
+                    f"⚠️ Google Maps only returned **{total_found}** unique results "
+                    f"for this query (you asked for {max_results}). "
+                    f"Try:\n"
+                    f"- A broader business-type synonym (e.g. `dentist`, `dental clinic`, "
+                    f"`dental office` instead of just `dental`)\n"
+                    f"- A larger geographic area (e.g. `New York NY` instead of just "
+                    f"`Manhattan`)\n"
+                    f"- Running multiple searches in different neighborhoods "
+                    f"(e.g. `Brooklyn NY`, `Queens NY`)"
+                )
+
             if results:
                 st.success(f"Found **{len(results)}** businesses.")
                 st.session_state["last_results"] = results

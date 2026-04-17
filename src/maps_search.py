@@ -72,6 +72,8 @@ def _parse_business(biz: dict) -> dict:
 # semantically equivalent — all return the same kind of business.
 QUERY_SYNONYMS = {
     # Dental — 7 variants covers the full space
+    "dental": ["dentist", "dental office", "dental clinic", "dental practice",
+                "family dentistry", "cosmetic dentist", "general dentist"],
     "dental office": ["dentist", "dental clinic", "dental practice",
                        "family dentistry", "cosmetic dentist", "general dentist",
                        "emergency dentist"],
@@ -81,6 +83,24 @@ QUERY_SYNONYMS = {
                        "family dentistry", "cosmetic dentist", "general dentist"],
     "dental practice": ["dentist", "dental office", "dental clinic",
                          "family dentistry", "cosmetic dentist"],
+    "dental care": ["dentist", "dental office", "dental clinic", "dental practice"],
+    # Short-form shorthands that users commonly type
+    "medical": ["medical clinic", "doctor", "physician", "urgent care", "family medicine"],
+    "legal": ["law firm", "attorney", "lawyer", "law office"],
+    "auto": ["auto repair", "mechanic", "auto shop", "car repair"],
+    "fitness": ["gym", "fitness center", "fitness studio", "health club"],
+    "beauty": ["salon", "hair salon", "beauty salon", "med spa"],
+    "food": ["restaurant", "cafe", "diner", "eatery"],
+    "plumbing": ["plumber", "plumbing service", "plumbing contractor"],
+    "electrical": ["electrician", "electrical contractor", "electrical service"],
+    "roofing": ["roofer", "roofing contractor", "roofing company"],
+    "realty": ["real estate agent", "realtor", "real estate agency"],
+    "accounting": ["accountant", "CPA", "accounting firm", "tax preparation"],
+    "veterinary": ["veterinarian", "vet clinic", "animal hospital", "pet clinic"],
+    "chiropractic": ["chiropractor", "chiropractic clinic", "chiropractic office"],
+    "eye": ["optometrist", "eye doctor", "vision center", "optical shop"],
+    "physical therapy": ["physical therapist", "PT clinic", "rehab clinic"],
+    "insurance": ["insurance agent", "insurance broker", "insurance agency"],
     # Legal
     "law firm": ["attorney", "lawyer", "legal services", "law office",
                   "law practice", "legal counsel"],
