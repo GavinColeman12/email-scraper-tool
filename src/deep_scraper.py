@@ -286,6 +286,53 @@ def deep_scrape_business_emails(business_name: str, website: str,
     )
     base["agent_findings"] = agent_findings
 
+    # ── Licensing lookup (medical/dental via NPI Registry) ───────────
+    # Only fires for regulated verticals + when we don't already have
+    # strong person data.
+    try:
+        from src.licensing_lookup import lookup_licensed_providers, parse_location
+        # Infer vertical from business_type or the location's address
+        bt = (base.get("business_type") or "").lower()
+        address = base.get("address") or location or ""
+        city, state, postal, street = parse_location(address)
+
+        if (bt and any(k in bt for k in ("dental", "dentist", "medical",
+                                           "doctor", "chiropr", "physical"))
+                and state):
+            licensed = lookup_licensed_providers(
+                vertical=bt,
+                business_name=business_name,
+                city=city,
+                state=state,
+                street_address=street,
+                postal_code=postal,
+            )
+            if licensed:
+                agent_findings["licensing"] = {"people": licensed}
+                # Also merge into the website agent's people list so
+                # downstream logic (pattern matching, contact ranking) sees them
+                website_people = agent_findings.get("website", {}).get("people", [])
+                existing = {p.get("name", "").lower() for p in website_people}
+                for lp in licensed:
+                    if lp["name"].lower() not in existing:
+                        website_people.append(lp)
+                agent_findings.setdefault("website", {})["people"] = website_people
+    except Exception as e:
+        print(f"[deep_scraper] licensing lookup error: {e}",
+              file=__import__('sys').stderr)
+
+    # ── WHOIS cross-verification (phone matching) ─────────────────────
+    whois_result = {"matches": None}
+    try:
+        from src.whois_verifier import verify_against_business_phone
+        business_phone = base.get("phone") or ""
+        if domain and business_phone:
+            whois_result = verify_against_business_phone(domain, business_phone)
+            agent_findings["whois"] = whois_result
+    except Exception as e:
+        print(f"[deep_scraper] WHOIS verify error: {e}",
+              file=__import__('sys').stderr)
+
     # Detect email pattern from scraped emails
     email_pattern = _detect_email_pattern(base.get("scraped_emails", []), domain)
 
@@ -314,6 +361,29 @@ def deep_scrape_business_emails(business_name: str, website: str,
         base["synthesis_reasoning"] = synth.get("reasoning", "")
         base["email_candidates"] = synth.get("alternate_candidates", [])
         base["synthesizer"] = "claude" if used_claude else "rules"
+
+    # ── Apply WHOIS boost to final confidence ─────────────────────────
+    # When WHOIS registrant phone matches the business phone, we have
+    # strong evidence that the domain genuinely belongs to this business.
+    if whois_result.get("matches") is True and base.get("primary_email"):
+        current_conf = base.get("confidence", "")
+        source = base.get("email_source", "")
+        if current_conf == "high":
+            base["email_source"] = f"{source}_whois_confirmed"
+        elif current_conf == "medium":
+            base["confidence"] = "high"
+            base["email_source"] = f"{source}_whois_confirmed"
+        elif current_conf == "low":
+            base["confidence"] = "medium"
+            base["email_source"] = f"{source}_whois_confirmed"
+        base["whois_verified"] = True
+    elif whois_result.get("matches") is False:
+        # Explicit mismatch — domain registrant phone doesn't match
+        # the listed business phone. Might be a different business, or
+        # a regional HQ with a different number. Flag it.
+        source = base.get("email_source", "")
+        base["email_source"] = f"{source}_whois_mismatch_warning"
+        base["whois_mismatch"] = True
 
     # Optional MX verification on the final pick
     if verify_with_mx and base.get("primary_email"):
