@@ -198,10 +198,20 @@ if filtered:
     for b in filtered:
         email = b.get("primary_email", "")
         contact_name = b.get("contact_name", "")
+        source = (b.get("email_source") or "").lower()
+        # Derive the verification evidence from source suffixes + fields
+        smtp_ver = "✓" if "smtp_verified" in source else ""
+        whois_ver = "✓" if "whois_confirmed" in source else (
+            "✗" if "whois_mismatch" in source else ""
+        )
+        npi_ver = "✓" if "npi_registry" in source or "_pattern_confirmed" in source else ""
         export_rows.append({
             "Badge": _verify_badge(b),
             "Score": b.get("lead_quality_score", ""),
             "Tier": b.get("lead_tier", ""),
+            "SMTP ✓": smtp_ver,
+            "WHOIS ✓": whois_ver,
+            "NPI/Pattern ✓": npi_ver,
             "Business Name": b.get("business_name", ""),
             "Business Type": b.get("business_type", ""),
             "Location": b.get("address", ""),

@@ -16,7 +16,10 @@ from bs4 import BeautifulSoup
 
 EMAIL_RE = re.compile(
     r"(?<![a-zA-Z0-9._%+-])"                          # no word char before
-    r"([a-zA-Z0-9._%+-]{2,}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
+    r"([a-zA-Z0-9]"                                   # FIRST char must be alphanumeric (RFC-valid)
+    r"[a-zA-Z0-9._%+-]{1,}@"
+    r"[a-zA-Z0-9]"                                    # FIRST char of domain must be alphanumeric (not -)
+    r"[a-zA-Z0-9.-]*\.[a-zA-Z]{2,})"
     r"(?![a-zA-Z0-9._%+-])"                           # no word char after
 )
 
@@ -39,15 +42,31 @@ REJECTED_PATTERNS = [
     r"^(example|test|demo|foo|bar|placeholder)@",
     r"@example\.(com|org|net)$",
     # File asset references accidentally matched as emails
-    r"\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|ico|bmp|tiff)@",   # email embedded in filename
-    r"@[^@]*\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|ico|bmp|tiff|css|js|json|xml)$",  # filename AFTER @
+    r"\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|ico|bmp|tiff|ttf|woff|woff2|otf|eot)@",
+    r"@[^@]*\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|ico|bmp|tiff|ttf|woff|woff2|otf|eot|css|js|json|xml|font)$",
+    r"@-?[a-z]*\.(ttf|woff|woff2|otf|eot)",          # font filename after @ (e.g. @-regular.ttf)
     r"@\d+x(\.|$)",                                            # image dimension suffix like @2x.png
     r"@\d+x\d+",                                               # image dimension strings
     # Sprite/asset naming conventions
     r"(sprite|asset|icon|logo|bundle|chunk|hash|placeholder)-",
+    # Font names commonly embedded in CSS (Montserrat, Roboto, etc. + variant)
+    r"@-(regular|bold|italic|medium|light|thin|black|semibold|extrabold)",
     # Common English words as prefix (false positives from page copy)
     r"^(and|the|or|for|you|your|our|this|that|from|with|have|will|into|over)@",
     r"^\d+[a-z]?@",                                            # starts with digit (usually IDs)
+    # Domain starts with a hyphen (never valid)
+    r"@-",
+    # Local part starts with a dot or dash (never valid per RFC)
+    r"^[.-]",
+    # Consecutive dots or dot-before-@ (malformed)
+    r"\.@",
+    r"\.\.",
+    # Suspicious schema.org / code-like artifacts leaked into scraping
+    r"(status|state|current|context|type|id|graph|keyframes|import|media)@",
+    # Fake TLDs that are actually code identifiers or filenames (not real public TLDs)
+    r"\.(init|config|conf|local|test|invalid|example|lan|internal|"
+    r"params|args|props|state|ttf|woff|woff2|otf|eot|font|css|js|json|"
+    r"xml|html|htm|svg|png|jpg|jpeg|gif|pdf)$",
 ]
 
 # Pages to scrape for contact info (in order of priority)
@@ -545,19 +564,26 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
 
     # ── Tier 1a: Named personal scraped email ───────────────────────────
     for e in scraped_emails:
-        if e and not _is_generic_inbox(e):
-            contact["contact_email"] = e
-            local = e.partition("@")[0].lower().split(".")[0]
-            contact["email_source"] = "scraped_mailto_or_regex"
-            contact["confidence"] = "high"
-            # Attach name if we can
-            first_guess = local.split(".")[0]
-            for p in (linkedin_people or []) + (persons or []):
-                if p.get("first", "").lower().startswith(first_guess[:4]):
-                    contact["contact_name"] = p.get("name") or p.get("full", "")
-                    contact["contact_title"] = p.get("title", "")
-                    break
-            return contact
+        if not e or _is_generic_inbox(e) or _is_rejected(e):
+            continue
+        # Also reject obvious junk we may have let through other extractors
+        local = e.partition("@")[0].lower()
+        if len(local) < 2 or local.startswith(".") or local.startswith("-"):
+            continue
+        domain_part = e.partition("@")[2].lower()
+        if not domain_part or domain_part.startswith("-") or domain_part.startswith("."):
+            continue
+        contact["contact_email"] = e
+        contact["email_source"] = "scraped_mailto_or_regex"
+        contact["confidence"] = "high"
+        # Attach name if we can — prefer LinkedIn + NPI persons over generic regex matches
+        first_guess = local.split(".")[0]
+        for p in (linkedin_people or []) + (persons or []):
+            if p.get("first", "").lower().startswith(first_guess[:4]):
+                contact["contact_name"] = p.get("name") or p.get("full", "")
+                contact["contact_title"] = p.get("title", "")
+                break
+        return contact
 
     # ── Tier 1b: Website decision maker on /team page CROSS-VERIFIED ────
     for p in (persons or []):
@@ -708,7 +734,10 @@ def scrape_business_emails(business_name: str, website: str,
                            find_decision_makers: bool = True,
                            location: str = "",
                            auto_verify: bool = False,
-                           use_haiku_fallback: bool = False) -> dict:
+                           use_haiku_fallback: bool = False,
+                           business_type: str = "",
+                           address: str = "",
+                           phone: str = "") -> dict:
     """
     Scrape emails from a business website + find decision makers via LinkedIn.
 
@@ -886,6 +915,58 @@ def scrape_business_emails(business_name: str, website: str,
             linkedin_people = []
     result["linkedin_people"] = linkedin_people
 
+    # ── NPI / licensing lookup for regulated verticals ────────────────
+    # Fires in Verified + Deep modes when we have business_type + address.
+    # Returns authoritative provider names (Dr. names for dental/medical)
+    # that anchor pattern construction with high confidence.
+    licensed_people = []
+    if auto_verify and business_type and address:
+        try:
+            from src.licensing_lookup import (
+                lookup_licensed_providers, parse_location,
+            )
+            bt_lower = (business_type or "").lower()
+            if any(k in bt_lower for k in ("dental", "dentist", "medical",
+                                             "doctor", "chiropr", "physical")):
+                city, state, postal, street = parse_location(address)
+                if state:
+                    licensed_people = lookup_licensed_providers(
+                        vertical=bt_lower,
+                        business_name=business_name,
+                        city=city,
+                        state=state,
+                        street_address=street,
+                        postal_code=postal,
+                    ) or []
+                    # Add to uniq_persons so pattern detection + contact
+                    # picking sees these authoritative names
+                    existing_names = {p.get("full", "").lower() for p in uniq_persons}
+                    for lp in licensed_people:
+                        if lp.get("name", "").lower() not in existing_names:
+                            uniq_persons.append({
+                                "title": lp.get("title", ""),
+                                "first": lp.get("first", ""),
+                                "last": lp.get("last", ""),
+                                "full": lp.get("name", ""),
+                                "found_on": lp.get("source", "npi_registry"),
+                                "authority": lp.get("authority", 15),
+                            })
+        except Exception as e:
+            import sys as _sys
+            print(f"[email_scraper] NPI lookup error: {e}", file=_sys.stderr)
+    result["licensed_providers"] = licensed_people
+
+    # ── WHOIS cross-verification ─────────────────────────────────────
+    whois_result = {"matches": None}
+    if auto_verify and domain and phone:
+        try:
+            from src.whois_verifier import verify_against_business_phone
+            whois_result = verify_against_business_phone(domain, phone)
+        except Exception as e:
+            import sys as _sys
+            print(f"[email_scraper] WHOIS error: {e}", file=_sys.stderr)
+    result["whois_result"] = whois_result
+
     # Pick the single best contact (name + email + source + confidence)
     top = _pick_top_contact(
         scraped_emails=ranked,
@@ -956,11 +1037,30 @@ def scrape_business_emails(business_name: str, website: str,
                     result["smtp_tried_patterns"] = smtp_result.get("patterns_tried", 0)
                 else:
                     # UNKNOWN — server blocked probe. Apply tightened tier:
-                    # keep only if pattern_confidence >= medium AND person exists.
+                    # keep if ANY positive signal exists: pattern_confidence >= medium,
+                    # OR person came from NPI (authority>=15 is authoritative),
+                    # OR person came from LinkedIn (cross-verified by website).
                     pat_conf = pattern_info.get("confidence", "none")
+                    has_npi_person = any(
+                        p.get("authority", 0) >= 15 or
+                        (p.get("found_on") or "").startswith("npi")
+                        for p in uniq_persons
+                    )
+                    has_linkedin_match = any(
+                        _name_match(wp, lp) for wp in uniq_persons
+                        for lp in linkedin_people
+                    ) if linkedin_people else False
+
                     if has_person and pat_conf in ("medium", "high"):
-                        result["confidence"] = "medium"
+                        result["confidence"] = "high" if has_npi_person else "medium"
                         result["email_source"] = top["email_source"] + "_unverified_with_signal"
+                    elif has_person and has_npi_person:
+                        # NPI alone is a strong signal — keep as medium
+                        result["confidence"] = "medium"
+                        result["email_source"] = top["email_source"] + "_npi_anchored"
+                    elif has_person and has_linkedin_match:
+                        result["confidence"] = "medium"
+                        result["email_source"] = top["email_source"] + "_linkedin_cross_verified"
                     else:
                         result["primary_email"] = ""
                         result["confidence"] = "skip"
@@ -968,5 +1068,23 @@ def scrape_business_emails(business_name: str, website: str,
             except Exception as e:
                 print(f"[email_scraper] SMTP verify failed: {e}",
                       file=__import__('sys').stderr)
+
+    # ── WHOIS boost applied AFTER SMTP so both signals compose ────────
+    if auto_verify and result.get("primary_email"):
+        if whois_result.get("matches") is True:
+            source = result.get("email_source", "")
+            if result.get("confidence") == "high":
+                result["email_source"] = f"{source}_whois_confirmed"
+            elif result.get("confidence") == "medium":
+                result["confidence"] = "high"
+                result["email_source"] = f"{source}_whois_confirmed"
+            elif result.get("confidence") == "low":
+                result["confidence"] = "medium"
+                result["email_source"] = f"{source}_whois_confirmed"
+            result["whois_verified"] = True
+        elif whois_result.get("matches") is False:
+            source = result.get("email_source", "")
+            result["email_source"] = f"{source}_whois_mismatch_warning"
+            result["whois_mismatch"] = True
 
     return result

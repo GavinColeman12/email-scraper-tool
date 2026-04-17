@@ -232,15 +232,21 @@ def _synthesize_rules_based(business_name, website, domain,
 
 def deep_scrape_business_emails(business_name: str, website: str,
                                  location: str = "",
-                                 verify_with_mx: bool = True) -> dict:
+                                 verify_with_mx: bool = True,
+                                 business_type: str = "",
+                                 address: str = "",
+                                 phone: str = "") -> dict:
     """
     Run deep multi-agent research to find the best decision-maker email.
 
     Steps:
     1. Base scrape (fetches website pages, extracts emails/names, LinkedIn)
-    2. Run all research agents in parallel (reusing fetched pages)
-    3. Claude synthesizer (or rules fallback) picks top contact
-    4. Optional MX verification on the final pick
+    2. Licensing lookup for regulated verticals (medical/dental via NPI)
+    3. WHOIS cross-verification against business phone
+    4. Claude synthesizer (or rules fallback) picks top contact
+    5. Optional MX verification on the final pick
+
+    Pass full `address` + `business_type` for NPI lookup to fire.
     """
     # Start with base scrape result — gives us fetched pages, scraped emails,
     # domain, pattern detection, etc.
@@ -255,6 +261,10 @@ def deep_scrape_business_emails(business_name: str, website: str,
     base["agent_findings"] = {}
     base["synthesis_reasoning"] = ""
     base["email_candidates"] = []
+    # Carry through so downstream NPI/WHOIS steps can find them
+    base["business_type"] = business_type
+    base["address"] = address
+    base["phone"] = phone
 
     domain = base.get("domain", "") or _extract_domain(website)
     if not domain:

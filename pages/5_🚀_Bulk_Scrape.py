@@ -116,6 +116,8 @@ def _scrape_worker(biz, job_id):
     try:
         addr = biz.get("address", "") or biz.get("location", "")
         city = addr.split(",")[0].strip() if addr else ""
+        business_type = biz.get("business_type", "") or ""
+        phone = biz.get("phone", "") or ""
 
         if mode == "deep":
             result = deep_scrape_business_emails(
@@ -123,6 +125,9 @@ def _scrape_worker(biz, job_id):
                 website=biz.get("website", ""),
                 location=city,
                 verify_with_mx=True,
+                business_type=business_type,
+                address=addr,
+                phone=phone,
             )
         elif mode == "verified":
             result = scrape_business_emails(
@@ -132,6 +137,9 @@ def _scrape_worker(biz, job_id):
                 location=city,
                 auto_verify=True,
                 use_haiku_fallback=True,
+                business_type=business_type,
+                address=addr,
+                phone=phone,
             )
         else:  # basic — still runs SMTP to prevent bounces, just skips Haiku
             result = scrape_business_emails(
@@ -141,6 +149,9 @@ def _scrape_worker(biz, job_id):
                 location=city,
                 auto_verify=True,         # ALWAYS verify — prevents bounces
                 use_haiku_fallback=False, # skip Haiku in basic mode
+                business_type=business_type,
+                address=addr,
+                phone=phone,
             )
 
         storage.update_business_emails(biz["id"], result)
@@ -215,6 +226,28 @@ st.subheader("🏆 Ranked leads")
 if not scraped:
     st.info("No scraped businesses yet. Run a bulk scrape above.")
     st.stop()
+
+# ── Rescore-only button (fixes empty Score/Tier without re-scraping) ──
+rs_col1, rs_col2 = st.columns([3, 1])
+with rs_col1:
+    missing_scores = [b for b in scraped
+                       if not b.get("lead_quality_score")
+                       and b.get("confidence")]
+    if missing_scores:
+        st.caption(
+            f"⚠️ {len(missing_scores)} businesses have no Score/Tier "
+            "(scraped before scoring was added). Click Rescore to fix."
+        )
+with rs_col2:
+    if st.button(f"🔄 Rescore {len(missing_scores)} businesses",
+                  disabled=not missing_scores):
+        progress = st.progress(0)
+        for i, b in enumerate(missing_scores):
+            s = compute_lead_quality_score(b)
+            storage.update_lead_score(b["id"], s["score"], s["tier"])
+            progress.progress((i + 1) / len(missing_scores))
+        st.success(f"✅ Rescored {len(missing_scores)} businesses")
+        st.rerun()
 
 # Compute fresh scores for all scraped businesses (recalculated each load
 # so the UI always reflects current data)
