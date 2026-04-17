@@ -24,10 +24,70 @@ if not searches:
     st.stop()
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 from src.email_verifier import (
     verify_smtp, verify_smtp_patterns, verify_mx,
     STATUS_VALID, STATUS_INVALID, STATUS_UNKNOWN,
 )
+
+
+# Title prefixes to strip when parsing names (case-insensitive)
+_TITLE_PREFIXES = {
+    "dr", "dr.", "doctor", "mr", "mr.", "mrs", "mrs.", "ms", "ms.",
+    "miss", "prof", "prof.", "professor", "attorney", "atty", "atty.",
+    "sir", "madam", "rev", "rev.", "reverend", "hon", "hon.",
+    "honorable", "capt", "capt.", "captain", "lt", "lt.",
+}
+
+# Credential suffixes to strip (case-insensitive, applied after comma split)
+_CREDENTIAL_SUFFIXES = {
+    "dmd", "dds", "md", "do", "phd", "dpm", "od", "dc", "dvm", "edd",
+    "mba", "jd", "esq", "esquire", "cpa", "rn", "np", "pa", "pa-c",
+    "bsn", "msn", "aprn", "fnp", "mph", "mha", "ms", "ma", "ba", "bs",
+    "facp", "faap", "facog", "facs",
+}
+
+
+def split_contact_name(full_name: str) -> tuple:
+    """
+    Parse a contact name into (first, last) by stripping prefix titles
+    (Dr., Attorney, etc.) and suffix credentials (DMD, Esq., PhD, etc.).
+
+    Examples:
+      'Dr. Caleb Martin, DMD'  → ('Caleb', 'Martin')
+      'Linda Miller'           → ('Linda', 'Miller')
+      'Sarah Chen, MD, MPH'    → ('Sarah', 'Chen')
+      'J. Robert Smith'        → ('J.', 'Smith')   # middle initial lost OK
+      ''                       → ('', '')
+    """
+    if not full_name:
+        return ("", "")
+
+    # Strip credentials after comma: "Dr. Caleb Martin, DMD" → "Dr. Caleb Martin"
+    name = full_name.split(",")[0].strip()
+
+    # Tokenize
+    tokens = name.split()
+    if not tokens:
+        return ("", "")
+
+    # Strip prefix titles (possibly multiple, e.g. "Dr. Rev. Smith")
+    while tokens and tokens[0].lower().rstrip(".") in _TITLE_PREFIXES:
+        tokens.pop(0)
+
+    # Strip suffix credentials that weren't comma-separated ("Smith DMD")
+    while tokens and tokens[-1].lower().rstrip(".") in _CREDENTIAL_SUFFIXES:
+        tokens.pop()
+
+    if not tokens:
+        return ("", "")
+    if len(tokens) == 1:
+        return (tokens[0], "")
+
+    # First = first token, Last = last token (middle names ignored for email purposes)
+    first = tokens[0]
+    last = tokens[-1]
+    return (first, last)
 
 labels = {s["id"]: f"#{s['id']} — {s['query']}" for s in searches}
 search_id = st.selectbox("Search", options=list(labels.keys()),
@@ -198,13 +258,14 @@ if filtered:
     for b in filtered:
         email = b.get("primary_email", "")
         contact_name = b.get("contact_name", "")
+        first_name, last_name = split_contact_name(contact_name)
         source = (b.get("email_source") or "").lower()
         # Derive the verification evidence from source suffixes + fields
         smtp_ver = "✓" if "smtp_verified" in source else ""
         whois_ver = "✓" if "whois_confirmed" in source else (
             "✗" if "whois_mismatch" in source else ""
         )
-        npi_ver = "✓" if "npi_registry" in source or "_pattern_confirmed" in source else ""
+        npi_ver = "✓" if "npi_registry" in source or "_pattern_confirmed" in source or "_npi_anchored" in source else ""
         export_rows.append({
             "Badge": _verify_badge(b),
             "Score": b.get("lead_quality_score", ""),
@@ -218,6 +279,8 @@ if filtered:
             "Phone": b.get("phone", ""),
             "Website": b.get("website", ""),
             "Email": email,
+            "First Name": first_name,
+            "Last Name": last_name,
             "Contact Name": contact_name,
             "Contact Title": b.get("contact_title", ""),
             "Email Source": b.get("email_source", ""),
@@ -261,9 +324,10 @@ if filtered:
     # Apollo-compatible format (for tools that expect Apollo columns)
     apollo_rows = []
     for row in export_rows:
-        contact_parts = row["Contact Name"].replace("Dr. ", "").replace("Dr ", "").split(" ", 1)
-        first = contact_parts[0] if contact_parts else ""
-        last = contact_parts[1] if len(contact_parts) > 1 else ""
+        # Reuse the split we already computed for the generic export —
+        # proper title/credential stripping
+        first = row.get("First Name", "")
+        last = row.get("Last Name", "")
         # Parse "Astoria NY" style into city + state if possible
         loc = row["Location"]
         city = ""
