@@ -154,8 +154,9 @@ def verify_waterfall(email, corroboration=None, use_neverbounce=True, skip_smtp=
     score = 0
 
     # Authoritative signals
+    # NeverBounce-valid alone clears SAFE_TO_SEND (65 + MX 5 = 70)
     if result.neverbounce_safe:
-        score += 50
+        score += 65
     elif result.neverbounce_result == "catchall":
         score -= 15
 
