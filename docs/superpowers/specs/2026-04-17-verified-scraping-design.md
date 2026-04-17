@@ -23,6 +23,20 @@ That makes "filter by HIGH + MEDIUM" unreliable. Users can't trust MEDIUM withou
 
 Non-goals: replacing the Plotly PDF charts, changing the search/pagination logic, re-architecting storage.
 
+## One-click workflow
+
+After finding businesses on Page 1, user should be able to run the full pipeline with one button:
+
+```
+1. Find businesses → save to search
+2. Click "🚀 Run full pipeline" on Find Businesses page
+3. Background job runs Verified mode (scrape + Haiku + SMTP) on all pending businesses
+4. User can navigate to Bulk Scrape to watch live progress, OR come back later
+5. When complete, Export CSV page shows the ranked export-ready list with verification badges
+```
+
+The button on Find Businesses triggers the same background job as Bulk Scrape's "Start in background" — just wired one-shot so the user doesn't need to navigate pages. Verified mode is forced (not user-selectable in this entry point) because we're standardizing on the recommended pipeline.
+
 ## Architecture
 
 ### Tightened confidence tiers

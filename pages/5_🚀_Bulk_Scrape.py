@@ -54,7 +54,7 @@ c4.metric("No website", len([b for b in businesses if not b.get("website")]))
 # ── Check active job for this search ──
 active = [
     j for j in background_jobs.list_active()
-    if j.get("job_type") in ("bulk_scrape", "bulk_deep_scrape")
+    if j.get("job_type") in ("bulk_scrape", "bulk_deep_scrape", "bulk_verified_scrape")
     and j.get("search_id") == search_id
 ]
 running_job = active[0] if active else None
@@ -71,13 +71,14 @@ mode_col1, mode_col2 = st.columns([3, 2])
 with mode_col1:
     mode = st.radio(
         "Mode",
-        ["basic", "deep"],
+        ["basic", "verified", "deep"],
         format_func=lambda k: {
-            "basic": "⚡ Basic — website + LinkedIn + pattern detection (fast, ~2 sec/biz)",
-            "deep": f"🧠 Deep research — 4 agents + {'Claude synthesizer' if has_claude else 'rules-based synthesizer'} (~$0.02/biz, ~5 sec/biz)",
+            "basic": "⚡ Basic — rules only, fast reconnaissance (~2 sec/biz, free)",
+            "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200, <2% bounce rate) — Recommended",
+            "deep": f"🧠 Deep — 4 agents + Sonnet + SMTP (~10 sec/biz, ~$2/200)",
         }[k],
         horizontal=False,
-        index=0,
+        index=1,  # default to Verified
     )
 with mode_col2:
     parallelism = st.slider(
@@ -85,7 +86,11 @@ with mode_col2:
         help="Higher = faster but more API pressure. 6 is safe for SearchApi.",
     )
 
-if mode == "deep":
+if mode == "verified":
+    cost = len(pending) * 0.0015  # ~$0.30 per 200 = $0.0015 per biz
+    st.caption(f"💰 Verified mode estimated cost: ~${cost:.2f} for {len(pending)} businesses "
+                "(Haiku fires on ~30% of businesses; SMTP verification is free)")
+elif mode == "deep":
     cost = len(pending) * 0.02
     st.caption(f"💰 Deep mode estimated cost: ~${cost:.2f} for {len(pending)} businesses")
 
@@ -119,7 +124,16 @@ def _scrape_worker(biz, job_id):
                 location=city,
                 verify_with_mx=True,
             )
-        else:
+        elif mode == "verified":
+            result = scrape_business_emails(
+                business_name=biz["business_name"],
+                website=biz.get("website", ""),
+                find_decision_makers=True,
+                location=city,
+                auto_verify=True,
+                use_haiku_fallback=True,
+            )
+        else:  # basic
             result = scrape_business_emails(
                 business_name=biz["business_name"],
                 website=biz.get("website", ""),
@@ -147,7 +161,11 @@ def _scrape_worker(biz, job_id):
 
 
 if start_clicked and pending:
-    job_type = "bulk_deep_scrape" if mode == "deep" else "bulk_scrape"
+    job_type = {
+        "deep": "bulk_deep_scrape",
+        "verified": "bulk_verified_scrape",
+        "basic": "bulk_scrape",
+    }[mode]
     job_id = background_jobs.start(
         job_type=job_type,
         items=pending,

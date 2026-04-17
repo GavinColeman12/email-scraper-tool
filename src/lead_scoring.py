@@ -16,6 +16,7 @@ _EMAIL_CONFIDENCE_POINTS = {
     "high": 40,
     "medium": 25,
     "low": 10,
+    "skip": -100,   # SKIP businesses get a score killer — drops them to 0
     "": 0,
     None: 0,
 }
@@ -124,6 +125,16 @@ def compute_lead_quality_score(business: dict) -> dict:
     confidence = business.get("confidence") or ""
     source = business.get("email_source") or ""
     verify_status = business.get("email_status") or ""
+
+    # SKIP confidence is a hard kill — no point scoring other components
+    # when the business has no deliverable email.
+    if confidence == "skip":
+        return {
+            "score": 0,
+            "breakdown": {"email_confidence": 0, "rating": 0, "reviews": 0,
+                           "website": 0, "decision_maker": 0},
+            "tier": "F",
+        }
 
     email_pts = _EMAIL_CONFIDENCE_POINTS.get(confidence, 0)
     email_pts += _EMAIL_SOURCE_BONUS.get(source, 0)

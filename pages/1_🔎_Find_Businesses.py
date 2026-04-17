@@ -129,19 +129,91 @@ if results:
 
     st.divider()
     st.subheader("Save to search")
-    if st.button(f"💾 Save {len(selected)} businesses to new search",
-                  type="primary", disabled=not selected):
+    save_col1, save_col2 = st.columns([1, 1])
+    with save_col1:
+        save_only = st.button(
+            f"💾 Save {len(selected)} businesses (no scraping)",
+            disabled=not selected,
+        )
+    with save_col2:
+        save_and_run = st.button(
+            f"🚀 Save + Run full pipeline ({len(selected)} businesses)",
+            type="primary",
+            disabled=not selected,
+            help="Saves the search AND immediately starts the Verified scraping job in "
+                 "the background: scrape emails, Haiku extraction, SMTP verification, "
+                 "lead scoring. When done, go to 📥 Export CSV to review the results.",
+        )
+
+    if save_only or save_and_run:
         search_id = storage.create_search(
             query=st.session_state.get("last_query", query),
             location=st.session_state.get("last_location", location),
             max_results=max_results,
         )
         count = storage.add_businesses_bulk(search_id, selected)
-        st.success(
-            f"Created search #{search_id} with {count} businesses. "
-            "Head to **📧 Scrape Emails** next."
-        )
-        # Clear the preview
+
+        if save_and_run:
+            # Kick off the Verified pipeline in the background
+            try:
+                from src import background_jobs
+                from src.deep_scraper import deep_scrape_business_emails
+                from src.lead_scoring import compute_lead_quality_score
+
+                # Pull fresh list with IDs
+                pending = [b for b in storage.list_businesses(search_id=search_id)
+                            if b.get("website")]
+
+                def _worker(biz, job_id):
+                    try:
+                        addr = biz.get("address", "") or biz.get("location", "")
+                        city = addr.split(",")[0].strip() if addr else ""
+                        result = deep_scrape_business_emails(
+                            business_name=biz["business_name"],
+                            website=biz.get("website", ""),
+                            location=city,
+                            verify_with_mx=True,
+                        )
+                        storage.update_business_emails(biz["id"], result)
+                        # Rescore
+                        fresh = storage.list_businesses(search_id=search_id)
+                        updated = next((b for b in fresh if b["id"] == biz["id"]), None)
+                        if updated:
+                            s = compute_lead_quality_score(updated)
+                            storage.update_lead_score(
+                                biz["id"], s["score"], s["tier"],
+                                all_emails=result.get("scraped_emails", []),
+                            )
+                        return True, f"✓ {biz['business_name']} → {result.get('primary_email') or '(skip)'}"
+                    except Exception as e:
+                        return False, f"❌ {biz['business_name']}: {type(e).__name__}"
+
+                job_id = background_jobs.start(
+                    job_type="bulk_deep_scrape",
+                    items=pending,
+                    worker_fn=_worker,
+                    search_id=search_id,
+                    max_workers=6,
+                    metadata={"mode": "verified_oneclick",
+                              "search_label": labels_for_search(query, location)},
+                )
+                st.success(
+                    f"🚀 Created search #{search_id} ({count} businesses). "
+                    f"Full pipeline running in background (job `{job_id[:8]}`). "
+                    f"Head to **📥 Export CSV** when it's done to review results."
+                )
+            except Exception as e:
+                st.error(f"Search saved but pipeline failed to start: {e}")
+        else:
+            st.success(
+                f"Created search #{search_id} with {count} businesses. "
+                "Head to **🚀 Bulk Scrape** or **📧 Scrape Emails** next."
+            )
+
         for key in ("last_results", "last_query", "last_location"):
             st.session_state.pop(key, None)
         st.rerun()
+
+
+def labels_for_search(q, loc):
+    return f"{q} in {loc}" if loc else q

@@ -249,6 +249,8 @@ def deep_scrape_business_emails(business_name: str, website: str,
         website=website,
         find_decision_makers=True,
         location=location,
+        auto_verify=True,
+        use_haiku_fallback=True,
     )
     base["agent_findings"] = {}
     base["synthesis_reasoning"] = ""

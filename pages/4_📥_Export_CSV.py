@@ -94,11 +94,32 @@ c2.metric("After filters", len(filtered))
 if filtered:
     st.subheader("Preview")
 
+    # Verification badge: combines confidence + SMTP + email_source for quick UI
+    def _verify_badge(biz):
+        conf = biz.get("confidence", "") or ""
+        src = biz.get("email_source", "") or ""
+        if conf == "high" and "smtp_verified" in src:
+            return "🟢 VERIFIED"
+        if conf == "high":
+            return "🟢 HIGH"
+        if conf == "medium" and "unverified_with_signal" in src:
+            return "🟡 MED (unverified)"
+        if conf == "medium":
+            return "🟡 MEDIUM"
+        if conf == "skip":
+            return "⛔ SKIP"
+        if conf == "low":
+            return "🔴 LOW"
+        return "❔ ?"
+
     export_rows = []
     for b in filtered:
         email = b.get("primary_email", "")
         contact_name = b.get("contact_name", "")
         export_rows.append({
+            "Badge": _verify_badge(b),
+            "Score": b.get("lead_quality_score", ""),
+            "Tier": b.get("lead_tier", ""),
             "Business Name": b.get("business_name", ""),
             "Business Type": b.get("business_type", ""),
             "Location": b.get("address", ""),
@@ -116,9 +137,21 @@ if filtered:
         })
 
     df = pd.DataFrame(export_rows)
-    st.dataframe(df.head(20), use_container_width=True, hide_index=True)
-    if len(df) > 20:
-        st.caption(f"Showing first 20 of {len(df)} rows")
+    # Sort by lead quality score DESC
+    if "Score" in df.columns and df["Score"].dtype != object:
+        df = df.sort_values("Score", ascending=False, na_position="last")
+
+    st.dataframe(
+        df.head(50), use_container_width=True, hide_index=True,
+        column_config={
+            "Website": st.column_config.LinkColumn("Website"),
+            "Score": st.column_config.ProgressColumn(
+                "Score", min_value=0, max_value=100, format="%d"
+            ) if df["Score"].dtype != object else None,
+        },
+    )
+    if len(df) > 50:
+        st.caption(f"Showing top 50 of {len(df)} rows (full CSV download below)")
 
     # ── Export buttons ──
     st.divider()

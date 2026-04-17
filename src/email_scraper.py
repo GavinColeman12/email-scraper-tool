@@ -699,7 +699,9 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
 def scrape_business_emails(business_name: str, website: str,
                            include_constructed: bool = True,
                            find_decision_makers: bool = True,
-                           location: str = "") -> dict:
+                           location: str = "",
+                           auto_verify: bool = False,
+                           use_haiku_fallback: bool = False) -> dict:
     """
     Scrape emails from a business website + find decision makers via LinkedIn.
 
@@ -801,6 +803,58 @@ def scrape_business_emails(business_name: str, website: str,
             seen_names[key] = p
     # Sort by authority DESC (team page first, then about, then contact, then homepage)
     uniq_persons = sorted(seen_names.values(), key=lambda p: -p.get("authority", 0))
+
+    # ── HAIKU FALLBACK: if rule-based found <2 people, ask Haiku to extract ──
+    haiku_used = {"extract_people": False, "match_emails": False,
+                   "filter_false_positives": False}
+    if use_haiku_fallback and len(uniq_persons) < 2 and homepage:
+        try:
+            from src.haiku_scraper import haiku_extract_people, is_haiku_available
+            if is_haiku_available():
+                # Concatenate team-page HTML (highest-authority pages)
+                team_html = homepage
+                for path, page_auth in [("team", 10), ("our-team", 10),
+                                         ("about", 7), ("leadership", 10)]:
+                    if path in candidate_paths:
+                        url = urljoin(website + "/", path)
+                        team_html += _fetch(url) or ""
+                haiku_persons = haiku_extract_people(team_html, business_name)
+                haiku_used["extract_people"] = len(haiku_persons) > 0
+                # Merge into uniq_persons — tag source
+                existing_names = {p["full"].lower() for p in uniq_persons}
+                for hp in haiku_persons:
+                    name = hp.get("name", "").strip()
+                    if name and name.lower() not in existing_names:
+                        uniq_persons.append({
+                            "title": hp.get("title", ""),
+                            "first": hp.get("first", ""),
+                            "last": hp.get("last", ""),
+                            "full": name,
+                            "found_on": "haiku",
+                            "authority": 9,  # Haiku extraction = near team-page auth
+                        })
+                        existing_names.add(name.lower())
+                        # If Haiku also returned an email for this person
+                        he = hp.get("email")
+                        if he and he not in all_emails and not _is_rejected(he):
+                            all_emails.append(he)
+        except Exception as e:
+            print(f"[email_scraper] Haiku extract_people failed: {e}", file=__import__('sys').stderr)
+
+    # ── HAIKU FALLBACK: filter false positives if scraped list is noisy ──
+    if use_haiku_fallback and len(all_emails) >= 5:
+        try:
+            from src.haiku_scraper import haiku_filter_false_positives
+            before = set(all_emails)
+            all_emails = haiku_filter_false_positives(all_emails)
+            haiku_used["filter_false_positives"] = set(all_emails) != before
+        except Exception:
+            pass
+
+    # Re-rank after potential Haiku filtering
+    ranked = _rank_emails(all_emails, domain)
+    result["scraped_emails"] = ranked
+
     result["contact_names"] = uniq_persons[:5]
 
     # Constructed email candidates
@@ -840,6 +894,72 @@ def scrape_business_emails(business_name: str, website: str,
     result["confidence"] = top["confidence"]
 
     # Expose pattern-detection evidence so the UI can show WHY we're confident
-    result["email_pattern_info"] = _detect_email_pattern_multi(ranked, domain)
+    pattern_info = _detect_email_pattern_multi(ranked, domain)
+    result["email_pattern_info"] = pattern_info
+    result["haiku_used"] = haiku_used if use_haiku_fallback else {}
+
+    # ── SMTP PATTERN VERIFICATION ────────────────────────────────────────
+    # Only runs for CONSTRUCTED emails (not scraped) AND when auto_verify
+    # is enabled. Tries multiple patterns until one verifies, or marks the
+    # business as SKIP if nothing deliverable is found.
+    if auto_verify and result["primary_email"]:
+        is_scraped = top.get("email_source", "").startswith("scraped")
+        has_person = bool(result["contact_name"])
+        # Pull first/last for pattern test
+        first, last = "", ""
+        if has_person:
+            # Try to get from matching person
+            for p in uniq_persons + linkedin_people:
+                if p.get("name") == result["contact_name"] or p.get("full") == result["contact_name"]:
+                    first = (p.get("first") or "").lower()
+                    last = (p.get("last") or "").lower()
+                    break
+            # Fallback: parse from name
+            if not first:
+                parts = result["contact_name"].split()
+                # Skip titles like Dr./Mr./Mrs.
+                parts = [p for p in parts if not p.rstrip(".").lower() in
+                          ("dr", "doctor", "mr", "mrs", "ms")]
+                if parts:
+                    first = parts[0].lower()
+                    if len(parts) >= 2:
+                        last = parts[-1].lower()
+
+        # Skip SMTP for scraped personal emails — they're already trusted
+        if not is_scraped and domain and first:
+            try:
+                from src.email_verifier import (
+                    verify_smtp_patterns, STATUS_VALID, STATUS_INVALID,
+                )
+                smtp_result = verify_smtp_patterns(first, last, domain, timeout=8)
+                smtp_status = smtp_result.get("status", "")
+                result["smtp_verified"] = smtp_status
+                result["smtp_verified_reason"] = smtp_result.get("reason", "")
+
+                if smtp_status == STATUS_VALID:
+                    # The verified email replaces our guess
+                    result["primary_email"] = smtp_result["email"]
+                    result["confidence"] = "high"
+                    result["email_source"] = top["email_source"] + "_smtp_verified"
+                elif smtp_status == STATUS_INVALID:
+                    # All patterns bounced — kill the primary email
+                    result["primary_email"] = ""
+                    result["confidence"] = "skip"
+                    result["email_source"] = "smtp_all_invalid_skip"
+                    result["smtp_tried_patterns"] = smtp_result.get("patterns_tried", 0)
+                else:
+                    # UNKNOWN — server blocked probe. Apply tightened tier:
+                    # keep only if pattern_confidence >= medium AND person exists.
+                    pat_conf = pattern_info.get("confidence", "none")
+                    if has_person and pat_conf in ("medium", "high"):
+                        result["confidence"] = "medium"
+                        result["email_source"] = top["email_source"] + "_unverified_with_signal"
+                    else:
+                        result["primary_email"] = ""
+                        result["confidence"] = "skip"
+                        result["email_source"] = "smtp_unknown_no_signal_skip"
+            except Exception as e:
+                print(f"[email_scraper] SMTP verify failed: {e}",
+                      file=__import__('sys').stderr)
 
     return result
