@@ -465,10 +465,15 @@ _NAME_STOPWORDS = {
 }
 
 
-def _construct_patterns(domain: str, person: dict = None) -> list:
+def _construct_patterns(domain: str, person: dict = None,
+                         industry: str = "", headcount: int = None) -> list:
     """
     Construct common email patterns from a domain + optional person name.
-    Returns a list of candidate emails ordered by likelihood.
+    Returns a list of candidate emails ordered by industry-specific likelihood.
+
+    When industry is set, uses src.industry_patterns.get_patterns_for() to
+    pick the right order (e.g. dental practices get first.last@ first, not
+    first@). Falls back to generic ordering when industry is unknown.
     """
     if not domain:
         return []
@@ -477,20 +482,30 @@ def _construct_patterns(domain: str, person: dict = None) -> list:
 
     if person and person.get("first"):
         first = person["first"].lower().strip()
-        last = person.get("last", "").lower().strip()
+        last = (person.get("last") or "").lower().strip()
         # Skip stopword-based false positives
         if first in _NAME_STOPWORDS or (last and last in _NAME_STOPWORDS):
             first = ""
         if first and len(first) >= 3 and first.isalpha():
-            if last:
-                candidates.extend([
-                    f"{first}@{domain}",
-                    f"{first}.{last}@{domain}",
-                    f"{first[0]}{last}@{domain}",
-                    f"{first}{last}@{domain}",
-                ])
-            else:
-                candidates.append(f"{first}@{domain}")
+            # Use industry-specific pattern priors when available
+            try:
+                from src.industry_patterns import get_patterns_for, build_email
+                priors = get_patterns_for(industry, headcount)
+                for pattern_name, _weight in priors:
+                    email = build_email(pattern_name, first, last, domain)
+                    if email and email not in candidates:
+                        candidates.append(email)
+            except Exception:
+                # Fallback to hardcoded order
+                if last:
+                    candidates.extend([
+                        f"{first}.{last}@{domain}",  # first.last@ now default
+                        f"{first}@{domain}",
+                        f"{first[0]}{last}@{domain}",
+                        f"{first}{last}@{domain}",
+                    ])
+                else:
+                    candidates.append(f"{first}@{domain}")
 
     # Generic fallback patterns
     candidates.extend([
@@ -501,6 +516,30 @@ def _construct_patterns(domain: str, person: dict = None) -> list:
     ])
 
     return candidates
+
+
+def _construct_patterns_with_labels(first, last, domain, industry="",
+                                      headcount=None):
+    """
+    Industry-aware pattern construction that returns (email, pattern_name) tuples.
+    Useful when you need to track WHICH pattern was used for each candidate
+    (e.g. for bounce tracking and learning).
+
+    Returns list of (email, pattern_name), highest-priority first.
+    """
+    if not first or not domain:
+        return []
+    try:
+        from src.industry_patterns import get_patterns_for, build_email
+    except Exception:
+        return []
+    priors = get_patterns_for(industry, headcount)
+    out = []
+    for pattern_name, _weight in priors:
+        email = build_email(pattern_name, first, last, domain)
+        if email:
+            out.append((email, pattern_name))
+    return out
 
 
 def _is_decision_title(title: str) -> bool:
@@ -897,9 +936,10 @@ def scrape_business_emails(business_name: str, website: str,
     if include_constructed and domain:
         constructed = []
         for person in uniq_persons[:3]:
-            constructed.extend(_construct_patterns(domain, person))
+            constructed.extend(_construct_patterns(
+                domain, person, industry=business_type))
         if not constructed:
-            constructed = _construct_patterns(domain)
+            constructed = _construct_patterns(domain, industry=business_type)
         # Dedupe, exclude already-scraped
         scraped_set = set(ranked)
         constructed = [c for c in dict.fromkeys(constructed) if c not in scraped_set]

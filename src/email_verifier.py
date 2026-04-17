@@ -319,7 +319,8 @@ def verify_smtp_patterns(first: str, last: str, domain: str,
             "patterns_tried": len(unique), "method": "smtp_pattern"}
 
 
-def verify_full(email: str, try_smtp: bool = True, try_paid: bool = False) -> dict:
+def verify_full(email: str, try_smtp: bool = True, try_paid: bool = False,
+                 try_neverbounce: bool = False) -> dict:
     """
     Run the full verification pipeline and return a deliverability score
     (0-100) with the breakdown.
@@ -384,7 +385,36 @@ def verify_full(email: str, try_smtp: bool = True, try_paid: bool = False) -> di
         if smtp["status"] == STATUS_VALID:
             result["reasons"].append("SMTP confirmed mailbox exists")
 
-    # 5. Paid ZeroBounce (optional)
+    # 5. NeverBounce (optional, authoritative 3rd gate)
+    if try_neverbounce:
+        try:
+            from src.neverbounce import verify as nb_verify
+            nb = nb_verify(email)
+            result["neverbounce_result"] = nb.result
+            result["neverbounce_safe"] = nb.safe_to_send
+            result["checks"]["neverbounce"] = nb.result
+
+            if nb.result == "valid":
+                result["status"] = STATUS_VALID
+                result["deliverability_score"] = 95
+                result["reasons"].append("NeverBounce: VALID")
+                return result
+            elif nb.result == "invalid":
+                result["status"] = STATUS_INVALID
+                result["reasons"].append("NeverBounce: INVALID")
+                return result
+            elif nb.result == "catchall":
+                result["status"] = STATUS_RISKY
+                result["deliverability_score"] = 55
+                result["reasons"].append("NeverBounce: CATCHALL (may bounce)")
+            elif nb.result == "disposable":
+                result["status"] = STATUS_DISPOSABLE
+                result["reasons"].append("NeverBounce: DISPOSABLE")
+                return result
+        except Exception as e:
+            result["reasons"].append(f"NeverBounce error: {e}")
+
+    # 6. Paid ZeroBounce (optional)
     if try_paid:
         zb = verify_zerobounce(email)
         if zb["status"] == STATUS_VALID:

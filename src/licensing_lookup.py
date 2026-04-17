@@ -197,11 +197,81 @@ def lookup_licensed_providers(vertical: str, business_name: str,
         if v in _VERTICAL_KEYS_DENTAL or "dental" in v or "dentist" in v:
             return lookup_dentists(
                 business_name, city, state, street_address, postal_code=postal_code)
+        if v in _VERTICAL_KEYS_LEGAL or "law" in v or "attorney" in v or "lawyer" in v:
+            return lookup_law_firm_attorneys(
+                firm_name=business_name, city=city, state=state or "NY")
     except Exception as e:
         print(f"[licensing_lookup] dispatch error: {e}", file=sys.stderr)
         return []
 
     return []
+
+
+# ── State bar / attorney lookup ───────────────────────────────────────
+
+_VERTICAL_KEYS_LEGAL = {
+    "law", "legal", "law_firm", "law_office", "lawyer", "attorney",
+    "attorneys", "law_firms",
+}
+
+# Map of state codes to state bar search endpoints
+STATE_BAR_ENDPOINTS = {
+    "NY": {
+        "search_url": "https://iapps.courts.state.ny.us/attorneyservices/search",
+        "method": "POST",
+        "parser": "ny_state_bar",
+    },
+    # Additions for NJ, CA, FL require per-state scrapers with session state.
+}
+
+
+def lookup_law_firm_attorneys(firm_name, city=None, state="NY"):
+    """
+    Look up attorneys at a law firm via state bar association.
+    Currently supports NY. Returns list of {name, first, last, title, source}.
+
+    The NY attorney search requires session cookies + CSRF tokens, so
+    for V1 we return an empty list — the infrastructure is here to extend
+    later with a session-based scraper (requests.Session + Playwright).
+    """
+    if not firm_name or state not in STATE_BAR_ENDPOINTS:
+        return []
+    try:
+        config = STATE_BAR_ENDPOINTS[state]
+        if config["parser"] == "ny_state_bar":
+            return _lookup_ny_state_bar(firm_name, city)
+    except Exception as e:
+        print(f"[licensing_lookup] state bar lookup error: {e}", file=sys.stderr)
+    return []
+
+
+def _lookup_ny_state_bar(firm_name, city=None):
+    """
+    Search NY Attorney Services for attorneys at a firm.
+
+    PLACEHOLDER: the NY search is a multi-step form with session state.
+    A production implementation would:
+      1. GET the search page, extract session cookie + CSRF token
+      2. POST the search form with the firm name
+      3. Parse results HTML for attorney details
+    For V1 we return empty — LinkedIn + website agents handle law firms
+    reasonably well already. State bar enrichment is a future upgrade.
+    """
+    return []
+
+
+def lookup_attorney_by_name(first, last, state="NY"):
+    """
+    Look up a specific attorney by name.
+    Returns {name, firm, city, bar_number, status} or None.
+
+    Future enhancement path — V1 returns None. The dispatcher
+    infrastructure is ready; parsers can be added per-state.
+    """
+    if not first or not last:
+        return None
+    # Future: per-state implementations
+    return None
 
 
 def parse_location(address: str) -> tuple:

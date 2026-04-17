@@ -163,6 +163,12 @@ def init_db() -> None:
             ("deliverability_score", "INTEGER"),
             ("all_found_emails_json", "TEXT"),
             ("hidden_emails_json", "TEXT"),
+            # New for waterfall + pattern tracking
+            ("pattern_used", "TEXT"),
+            ("neverbounce_result", "TEXT"),
+            ("waterfall_verdict", "TEXT"),
+            ("waterfall_confidence", "INTEGER"),
+            ("headcount", "INTEGER"),
         ]:
             try:
                 if USE_PG:
@@ -175,6 +181,13 @@ def init_db() -> None:
         _INITIALIZED = True
     finally:
         conn.close()
+
+    # Initialize bounce tracking tables too (idempotent)
+    try:
+        from src.bounce_tracker import init_bounce_tables
+        init_bounce_tables()
+    except Exception:
+        pass  # Don't fail startup if bounce tables can't be created
 
 
 # ── Searches ──────────────────────────────────────────────────────────
