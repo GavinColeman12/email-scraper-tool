@@ -609,14 +609,18 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
             contact["confidence"] = "high"
         else:
             contact["email_source"] = "constructed_from_linkedin"
-            # KEY INSIGHT: if we found multiple real emails at this domain
-            # and they all use the same pattern, our constructed email is
-            # much more likely to be correct — bump medium to high.
+            # Tightened tier logic: MEDIUM requires two positive signals
+            # (LinkedIn decision maker + pattern evidence from ≥2 emails).
+            # Pure guess with no pattern evidence = LOW, not MEDIUM.
             if pattern_confidence == "high":
                 contact["confidence"] = "high"
                 contact["email_source"] += "_pattern_confirmed"
-            else:
+            elif pattern_confidence == "medium":
                 contact["confidence"] = "medium"
+                contact["email_source"] += "_pattern_anchored"
+            else:
+                contact["confidence"] = "low"
+                contact["email_source"] += "_no_pattern_evidence"
         return contact
 
     # ── Tier 3: Website decision maker on /about or homepage ────────────
@@ -637,14 +641,17 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
         contact["contact_name"] = p.get("full", "")
         contact["contact_title"] = title
         contact["email_source"] = "constructed_from_website_decision_maker"
-        # Pattern confirmation bump — same idea as Tier 2
+        # Tightened tier logic: MEDIUM requires pattern evidence ≥ medium.
+        # Without real pattern evidence, first@domain is a guess = LOW.
         if pattern_confidence == "high":
             contact["confidence"] = "high"
             contact["email_source"] += "_pattern_confirmed"
         elif pattern_confidence == "medium":
             contact["confidence"] = "medium"
+            contact["email_source"] += "_pattern_anchored"
         else:
-            contact["confidence"] = "medium"
+            contact["confidence"] = "low"
+            contact["email_source"] += "_no_pattern_evidence"
         return contact
 
     # ── Tier 4: Any person from /team (Dr./Doctor — common for dental) ──

@@ -23,6 +23,12 @@ if not searches:
     st.warning("No searches yet.")
     st.stop()
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from src.email_verifier import (
+    verify_smtp, verify_smtp_patterns, verify_mx,
+    STATUS_VALID, STATUS_INVALID, STATUS_UNKNOWN,
+)
+
 labels = {s["id"]: f"#{s['id']} — {s['query']}" for s in searches}
 search_id = st.selectbox("Search", options=list(labels.keys()),
                           format_func=lambda k: labels[k])
@@ -89,6 +95,82 @@ filtered = [b for b in businesses if matches(b)]
 c1, c2 = st.columns(2)
 c1.metric("Total in search", len(businesses))
 c2.metric("After filters", len(filtered))
+
+# ── Pre-flight: re-verify every primary email NOW (reduces bounces to ~0) ──
+st.divider()
+st.subheader("✅ Pre-flight: verify emails before export")
+st.caption(
+    "Runs SMTP verification against the recipient mail server on every primary email "
+    "that hasn't been verified yet. Anything that bounces will be marked INVALID and "
+    "dropped from the export. **Do this before sending a batch.**"
+)
+
+to_verify = [b for b in filtered
+             if b.get("primary_email")
+             and b.get("email_status") not in ("valid", "invalid")]
+
+ver_c1, ver_c2 = st.columns([3, 2])
+with ver_c1:
+    strict_mode = st.checkbox(
+        "Strict mode: drop UNKNOWN results (server-blocked probes) as well as INVALID",
+        value=False,
+        help="Unchecked: UNKNOWN stays in the list (may bounce). "
+             "Checked: only SMTP-VERIFIED emails survive (zero-bounce guarantee, "
+             "but you lose ~15-20% of leads whose servers block verification).",
+    )
+with ver_c2:
+    if st.button(f"🔄 Verify {len(to_verify)} pending emails",
+                  disabled=not to_verify, type="primary"):
+        prog = st.progress(0)
+        status_box = st.empty()
+        counts = {"valid": 0, "invalid": 0, "unknown": 0}
+
+        def _verify_one(biz):
+            email = biz.get("primary_email", "")
+            if not email:
+                return biz, None
+            try:
+                result = verify_smtp(email, timeout=8)
+            except Exception as e:
+                result = {"status": "unknown", "reason": str(e)}
+            storage.update_business_verification(
+                biz["id"], result.get("status", "unknown"),
+                result.get("reason", ""),
+            )
+            return biz, result
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futures = [ex.submit(_verify_one, b) for b in to_verify]
+            for fut in as_completed(futures):
+                biz, result = fut.result()
+                completed += 1
+                if result:
+                    status = result.get("status", "unknown")
+                    counts[status if status in counts else "unknown"] += 1
+                    prog.progress(completed / len(to_verify))
+                    status_box.write(
+                        f"**{completed}/{len(to_verify)}** · {biz.get('business_name')} → "
+                        f"{biz.get('primary_email')} → **{status}**"
+                    )
+
+        prog.empty()
+        status_box.success(
+            f"✅ Verified {completed} emails — "
+            f"{counts['valid']} valid · {counts['invalid']} invalid · "
+            f"{counts['unknown']} unknown (server blocked)"
+        )
+        st.rerun()
+
+# Apply verification filter based on strict mode
+if strict_mode:
+    filtered = [b for b in filtered if b.get("email_status") == "valid"]
+    st.info(f"🔒 Strict mode: showing only {len(filtered)} SMTP-VERIFIED leads")
+else:
+    # Exclude only invalid — keep valid + unknown + unverified
+    filtered = [b for b in filtered if b.get("email_status") != "invalid"]
+
+st.divider()
 
 # ── Preview + export ──
 if filtered:

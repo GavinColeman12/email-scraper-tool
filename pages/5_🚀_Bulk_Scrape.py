@@ -73,9 +73,9 @@ with mode_col1:
         "Mode",
         ["basic", "verified", "deep"],
         format_func=lambda k: {
-            "basic": "⚡ Basic — rules only, fast reconnaissance (~2 sec/biz, free)",
-            "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200, <2% bounce rate) — Recommended",
-            "deep": f"🧠 Deep — 4 agents + Sonnet + SMTP (~10 sec/biz, ~$2/200)",
+            "basic": "⚡ Basic — rules + SMTP verification (~5 sec/biz, free, <5% bounce)",
+            "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200, <2% bounce) — Recommended",
+            "deep": f"🧠 Deep — 4 agents + Sonnet + SMTP + Haiku (~10 sec/biz, ~$2/200, <2% bounce)",
         }[k],
         horizontal=False,
         index=1,  # default to Verified
@@ -133,12 +133,14 @@ def _scrape_worker(biz, job_id):
                 auto_verify=True,
                 use_haiku_fallback=True,
             )
-        else:  # basic
+        else:  # basic — still runs SMTP to prevent bounces, just skips Haiku
             result = scrape_business_emails(
                 business_name=biz["business_name"],
                 website=biz.get("website", ""),
                 find_decision_makers=True,
                 location=city,
+                auto_verify=True,         # ALWAYS verify — prevents bounces
+                use_haiku_fallback=False, # skip Haiku in basic mode
             )
 
         storage.update_business_emails(biz["id"], result)

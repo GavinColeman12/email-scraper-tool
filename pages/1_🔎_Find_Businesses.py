@@ -204,14 +204,14 @@ if results:
                     except Exception as e:
                         return False, f"❌ {biz['business_name']}: {type(e).__name__}"
 
+                label = f"{query} in {location}" if location else query
                 job_id = background_jobs.start(
-                    job_type="bulk_deep_scrape",
+                    job_type="bulk_verified_scrape",
                     items=pending,
                     worker_fn=_worker,
                     search_id=search_id,
                     max_workers=6,
-                    metadata={"mode": "verified_oneclick",
-                              "search_label": labels_for_search(query, location)},
+                    metadata={"mode": "verified_oneclick", "search_label": label},
                 )
                 st.success(
                     f"🚀 Created search #{search_id} ({count} businesses). "
@@ -230,6 +230,3 @@ if results:
             st.session_state.pop(key, None)
         st.rerun()
 
-
-def labels_for_search(q, loc):
-    return f"{q} in {loc}" if loc else q
