@@ -212,6 +212,18 @@ def _extract_from_html(html: str, page_path: str = "") -> tuple:
         if not _is_rejected(match):
             emails.append(match.lower())
 
+    # Enhanced hidden-email sources: Cloudflare, obfuscated [at], JSON-LD,
+    # JS-assembled, meta tags. Each catches a different obfuscation pattern.
+    try:
+        from src.email_sources import extract_all_hidden_emails
+        hidden = extract_all_hidden_emails(html)
+        for source_name, source_emails in hidden.items():
+            for e in source_emails:
+                if e and not _is_rejected(e) and e not in emails:
+                    emails.append(e)
+    except Exception:
+        pass
+
     # Extract person names with page source
     authority = _page_authority(page_path)
     text = soup.get_text(" ", strip=True)
@@ -234,14 +246,95 @@ def _extract_from_html(html: str, page_path: str = "") -> tuple:
 def _detect_email_pattern(scraped_emails: list, domain: str) -> str:
     """
     Sniff the email pattern used by the business from scraped addresses.
-    Returns a pattern string we can use to construct new emails:
-      - 'first'         -> jane@domain.com
-      - 'first.last'    -> jane.smith@domain.com
-      - 'firstlast'     -> janesmith@domain.com
-      - 'f.last'        -> j.smith@domain.com
-      - 'flast'         -> jsmith@domain.com
-      - ''              -> no clear pattern
+    Returns a pattern string we can use to construct new emails.
+
+    Uses the legacy single-email heuristic. For stronger signal from
+    multiple emails, use _detect_email_pattern_multi() which returns a
+    confidence-weighted result.
     """
+    multi = _detect_email_pattern_multi(scraped_emails, domain)
+    return multi.get("pattern", "")
+
+
+def _detect_email_pattern_multi(scraped_emails: list, domain: str) -> dict:
+    """
+    Sniff the email pattern using MULTIPLE scraped emails for higher
+    confidence. If an org uses 'first.last@' for 3 different people, we're
+    very confident that's their convention — apply it to all constructed
+    emails for that domain.
+
+    Returns:
+      {
+        "pattern": "first.last" | "first" | "flast" | "f.last" | "firstlast" | "",
+        "confidence": "high" | "medium" | "low" | "none",
+        "evidence_count": <int — how many real emails confirmed this pattern>,
+        "all_patterns": {"first.last": 3, "first": 1, ...}  # raw counts
+      }
+    """
+    result = {"pattern": "", "confidence": "none", "evidence_count": 0,
+              "all_patterns": {}}
+    if not scraped_emails or not domain:
+        return result
+
+    pattern_counts = {}
+    for e in scraped_emails:
+        local, _, dom = e.partition("@")
+        if not dom or not dom.endswith(domain):
+            continue
+        if _is_generic_inbox(e):
+            continue
+        local_lower = local.lower()
+
+        # Classify this email's pattern
+        pat = _classify_local_part(local_lower)
+        if pat:
+            pattern_counts[pat] = pattern_counts.get(pat, 0) + 1
+
+    result["all_patterns"] = pattern_counts
+    if not pattern_counts:
+        return result
+
+    # Pick the winning pattern (most evidence)
+    winner = max(pattern_counts.items(), key=lambda x: x[1])
+    pattern, count = winner
+    result["pattern"] = pattern
+    result["evidence_count"] = count
+
+    # Confidence: >=3 examples = high, 2 = medium, 1 = low
+    if count >= 3:
+        result["confidence"] = "high"
+    elif count == 2:
+        result["confidence"] = "medium"
+    else:
+        result["confidence"] = "low"
+
+    return result
+
+
+def _classify_local_part(local: str) -> str:
+    """Return the pattern name for a local part, or '' if ambiguous/unusable."""
+    if not local or not local.replace(".", "").replace("-", "").isalpha():
+        return ""
+
+    if "." in local:
+        parts = local.split(".")
+        if len(parts) == 2 and all(p.isalpha() for p in parts):
+            if len(parts[0]) == 1:
+                return "f.last"
+            if len(parts[0]) >= 2 and len(parts[1]) >= 2:
+                return "first.last"
+    elif local.isalpha():
+        # Ambiguous between 'first' (jane) and 'flast' (jsmith) and
+        # 'firstlast' (janesmith). We can't reliably distinguish without
+        # knowing the person's real name. Default to 'first' which is most
+        # common for small businesses.
+        if 2 <= len(local) <= 12:
+            return "first"
+    return ""
+
+
+def _detect_email_pattern_old(scraped_emails: list, domain: str) -> str:
+    """LEGACY: single-email detection. Kept for reference; not used."""
     if not scraped_emails or not domain:
         return ""
     for e in scraped_emails:
@@ -441,7 +534,9 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
         "confidence": "",
     }
 
-    pattern = _detect_email_pattern(scraped_emails, domain)
+    pattern_info = _detect_email_pattern_multi(scraped_emails, domain)
+    pattern = pattern_info.get("pattern", "")
+    pattern_confidence = pattern_info.get("confidence", "none")
 
     def build(first, last):
         if pattern:
@@ -514,7 +609,14 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
             contact["confidence"] = "high"
         else:
             contact["email_source"] = "constructed_from_linkedin"
-            contact["confidence"] = "medium"
+            # KEY INSIGHT: if we found multiple real emails at this domain
+            # and they all use the same pattern, our constructed email is
+            # much more likely to be correct — bump medium to high.
+            if pattern_confidence == "high":
+                contact["confidence"] = "high"
+                contact["email_source"] += "_pattern_confirmed"
+            else:
+                contact["confidence"] = "medium"
         return contact
 
     # ── Tier 3: Website decision maker on /about or homepage ────────────
@@ -535,7 +637,14 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
         contact["contact_name"] = p.get("full", "")
         contact["contact_title"] = title
         contact["email_source"] = "constructed_from_website_decision_maker"
-        contact["confidence"] = "medium"
+        # Pattern confirmation bump — same idea as Tier 2
+        if pattern_confidence == "high":
+            contact["confidence"] = "high"
+            contact["email_source"] += "_pattern_confirmed"
+        elif pattern_confidence == "medium":
+            contact["confidence"] = "medium"
+        else:
+            contact["confidence"] = "medium"
         return contact
 
     # ── Tier 4: Any person from /team (Dr./Doctor — common for dental) ──
@@ -729,5 +838,8 @@ def scrape_business_emails(business_name: str, website: str,
     result["contact_title"] = top["contact_title"]
     result["email_source"] = top["email_source"]
     result["confidence"] = top["confidence"]
+
+    # Expose pattern-detection evidence so the UI can show WHY we're confident
+    result["email_pattern_info"] = _detect_email_pattern_multi(ranked, domain)
 
     return result

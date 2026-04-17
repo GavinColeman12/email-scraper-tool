@@ -158,6 +158,11 @@ def init_db() -> None:
             ("confidence", "TEXT"),
             ("reasoning", "TEXT"),
             ("synthesizer", "TEXT"),
+            ("lead_quality_score", "INTEGER"),
+            ("lead_tier", "TEXT"),
+            ("deliverability_score", "INTEGER"),
+            ("all_found_emails_json", "TEXT"),
+            ("hidden_emails_json", "TEXT"),
         ]:
             try:
                 if USE_PG:
@@ -403,6 +408,39 @@ def override_primary_email(business_id: int, new_email: str) -> None:
         cur.execute(
             f"UPDATE businesses SET primary_email = {_PARAM} WHERE id = {_PARAM}",
             (new_email, business_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_lead_score(business_id: int, score: int, tier: str,
+                       deliverability: int = None,
+                       all_emails: list = None,
+                       hidden_emails: dict = None) -> None:
+    """Store computed lead quality + optional deliverability + source breakdown."""
+    init_db()
+    conn = _connect()
+    try:
+        cur = _cursor(conn)
+        sets = [
+            f"lead_quality_score = {_PARAM}",
+            f"lead_tier = {_PARAM}",
+        ]
+        params = [int(score or 0), str(tier or "")]
+        if deliverability is not None:
+            sets.append(f"deliverability_score = {_PARAM}")
+            params.append(int(deliverability))
+        if all_emails is not None:
+            sets.append(f"all_found_emails_json = {_PARAM}")
+            params.append(json.dumps(all_emails))
+        if hidden_emails is not None:
+            sets.append(f"hidden_emails_json = {_PARAM}")
+            params.append(json.dumps(hidden_emails))
+        params.append(business_id)
+        cur.execute(
+            f"UPDATE businesses SET {', '.join(sets)} WHERE id = {_PARAM}",
+            params,
         )
         conn.commit()
     finally:

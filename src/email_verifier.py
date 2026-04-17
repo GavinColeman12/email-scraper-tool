@@ -45,6 +45,27 @@ def is_known_catchall_mx(mx_host: str) -> bool:
     return any(host.endswith(p) for p in KNOWN_CATCHALL_PROVIDERS)
 
 
+# Disposable email domains — if an email matches these, it's throwaway
+DISPOSABLE_DOMAINS = frozenset({
+    "10minutemail.com", "guerrillamail.com", "mailinator.com", "tempmail.com",
+    "throwaway.email", "trashmail.com", "yopmail.com", "maildrop.cc",
+    "sharklasers.com", "guerrillamailblock.com", "emailondeck.com",
+    "getnada.com", "fakemailgenerator.com", "temp-mail.org", "dispostable.com",
+    "mohmal.com", "tempail.com", "tempmailaddress.com", "jetable.org",
+    "spam4.me", "trbvm.com", "mailnesia.com", "mintemail.com",
+    "inboxbear.com", "spamgourmet.com", "mytemp.email", "burnermail.io",
+})
+
+
+def is_disposable(email: str) -> bool:
+    domain = _domain_of(email)
+    if not domain:
+        return False
+    return domain in DISPOSABLE_DOMAINS or any(
+        domain.endswith("." + d) for d in DISPOSABLE_DOMAINS
+    )
+
+
 def _domain_of(email: str) -> str:
     m = EMAIL_RE.match(email)
     if not m:
@@ -296,6 +317,98 @@ def verify_smtp_patterns(first: str, last: str, domain: str,
         return best
     return {"email": unique[0] if unique else "", "status": STATUS_UNKNOWN,
             "patterns_tried": len(unique), "method": "smtp_pattern"}
+
+
+def verify_full(email: str, try_smtp: bool = True, try_paid: bool = False) -> dict:
+    """
+    Run the full verification pipeline and return a deliverability score
+    (0-100) with the breakdown.
+
+    Order: syntax → disposable → DNS/MX → SMTP mailbox → (optional) ZeroBounce.
+    Stops early on any definite failure.
+
+    Returns: {
+        "email": ...,
+        "status": valid|invalid|risky|unknown|disposable,
+        "deliverability_score": 0-100,
+        "reasons": [list of check-level findings],
+        "checks": {"syntax": bool, "not_disposable": bool, "mx": bool, "smtp": ...},
+    }
+    """
+    result = {
+        "email": email,
+        "status": STATUS_UNKNOWN,
+        "deliverability_score": 0,
+        "reasons": [],
+        "checks": {},
+    }
+
+    # 1. Syntax
+    if not email or not EMAIL_RE.match(email):
+        result["status"] = STATUS_INVALID
+        result["reasons"].append("Invalid email syntax")
+        result["checks"]["syntax"] = False
+        return result
+    result["checks"]["syntax"] = True
+
+    # 2. Disposable domain check (hard reject)
+    if is_disposable(email):
+        result["status"] = STATUS_DISPOSABLE
+        result["reasons"].append("Disposable/throwaway domain")
+        result["checks"]["not_disposable"] = False
+        return result
+    result["checks"]["not_disposable"] = True
+
+    # 3. MX check
+    mx = verify_mx(email)
+    result["checks"]["mx"] = mx.get("has_mx", False)
+    if mx["status"] == STATUS_INVALID:
+        result["status"] = STATUS_INVALID
+        result["reasons"].append(mx.get("reason", "No MX record"))
+        return result
+    result["reasons"].append(f"MX: {mx.get('reason', 'ok')}")
+
+    # 4. SMTP mailbox check (optional, free but slow)
+    if try_smtp:
+        smtp = verify_smtp(email, timeout=8)
+        result["checks"]["smtp"] = smtp["status"]
+        if smtp["status"] == STATUS_INVALID:
+            result["status"] = STATUS_INVALID
+            result["reasons"].append(smtp.get("reason", "Mailbox not found"))
+            return result
+        if smtp.get("is_catchall"):
+            result["status"] = STATUS_RISKY
+            result["reasons"].append("Catch-all domain — mailbox not verifiable")
+            result["deliverability_score"] = 55
+            return result
+        if smtp["status"] == STATUS_VALID:
+            result["reasons"].append("SMTP confirmed mailbox exists")
+
+    # 5. Paid ZeroBounce (optional)
+    if try_paid:
+        zb = verify_zerobounce(email)
+        if zb["status"] == STATUS_VALID:
+            result["status"] = STATUS_VALID
+            result["reasons"].append(f"ZeroBounce: {zb.get('reason', 'valid')}")
+            result["deliverability_score"] = 95
+            return result
+        if zb["status"] == STATUS_INVALID:
+            result["status"] = STATUS_INVALID
+            result["reasons"].append(f"ZeroBounce: {zb.get('reason', 'invalid')}")
+            return result
+
+    # Compute score from what we know
+    if result["checks"].get("smtp") == STATUS_VALID:
+        result["deliverability_score"] = 85
+        result["status"] = STATUS_VALID
+    elif mx["status"] == STATUS_VALID:
+        result["deliverability_score"] = 65 if try_smtp else 60
+        result["status"] = STATUS_VALID  # MX-valid, best we can say without SMTP
+    else:
+        result["deliverability_score"] = 30
+        result["status"] = STATUS_UNKNOWN
+
+    return result
 
 
 def verify_zerobounce(email: str) -> dict:
