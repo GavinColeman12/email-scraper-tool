@@ -24,7 +24,11 @@ with st.form("search_form"):
                            placeholder="e.g. dental clinic, law firm, restaurant")
     location = c2.text_input("Location (city, state)",
                               placeholder="e.g. Manhattan NYC, Brooklyn NY")
-    max_results = c3.slider("Max results", 10, 100, 40)
+    max_results = c3.slider("Max results", 10, 250, 100,
+                             help="Google Maps usually caps a single query around 20-60 results. "
+                                  "The scraper automatically tries synonym variants (e.g. dentist → "
+                                  "dental clinic → dental practice) to cross that cap. Top out at "
+                                  "~200 for most business types.")
 
     skip_seen = st.checkbox(
         "🧹 Skip businesses I've already seen (dedupe by Google place_id)",

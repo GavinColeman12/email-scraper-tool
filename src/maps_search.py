@@ -71,35 +71,101 @@ def _parse_business(biz: dict) -> dict:
 # let us keep going by re-querying with related terms. Picked to be
 # semantically equivalent — all return the same kind of business.
 QUERY_SYNONYMS = {
-    "dental office": ["dentist", "dental clinic", "dental practice", "family dentistry", "cosmetic dentist"],
-    "dentist": ["dental office", "dental clinic", "dental practice", "family dentistry"],
-    "dental clinic": ["dentist", "dental office", "dental practice"],
-    "law firm": ["attorney", "lawyer", "legal services", "law office"],
-    "attorney": ["law firm", "lawyer", "legal services"],
-    "lawyer": ["law firm", "attorney", "legal services"],
-    "restaurant": ["eatery", "dining", "bistro", "cafe"],
-    "chiropractor": ["chiropractic clinic", "chiropractic office", "spine care"],
-    "accountant": ["CPA", "accounting firm", "tax preparation"],
-    "veterinarian": ["vet clinic", "animal hospital", "pet clinic"],
-    "plumber": ["plumbing service", "plumbing company", "plumbing contractor"],
-    "electrician": ["electrical service", "electrical contractor"],
-    "hvac": ["hvac contractor", "heating and cooling", "air conditioning"],
-    "roofer": ["roofing contractor", "roofing company"],
-    "gym": ["fitness center", "fitness studio", "health club"],
-    "salon": ["hair salon", "beauty salon"],
-    "barber": ["barbershop", "men's haircuts"],
-    "med spa": ["medspa", "medical spa", "aesthetic clinic"],
-    "orthodontist": ["orthodontics", "braces clinic"],
-    "optometrist": ["eye doctor", "optical shop", "vision center"],
+    # Dental — 7 variants covers the full space
+    "dental office": ["dentist", "dental clinic", "dental practice",
+                       "family dentistry", "cosmetic dentist", "general dentist",
+                       "emergency dentist"],
+    "dentist": ["dental office", "dental clinic", "dental practice",
+                 "family dentistry", "cosmetic dentist", "general dentist"],
+    "dental clinic": ["dentist", "dental office", "dental practice",
+                       "family dentistry", "cosmetic dentist", "general dentist"],
+    "dental practice": ["dentist", "dental office", "dental clinic",
+                         "family dentistry", "cosmetic dentist"],
+    # Legal
+    "law firm": ["attorney", "lawyer", "legal services", "law office",
+                  "law practice", "legal counsel"],
+    "attorney": ["law firm", "lawyer", "legal services", "law office"],
+    "lawyer": ["law firm", "attorney", "legal services", "law office"],
+    "law office": ["law firm", "attorney", "lawyer", "legal services"],
+    # Food & beverage
+    "restaurant": ["eatery", "dining", "bistro", "cafe", "grill", "kitchen"],
+    "cafe": ["coffee shop", "coffeehouse", "bakery cafe", "espresso bar"],
+    "coffee shop": ["cafe", "coffeehouse", "espresso bar"],
+    # Medical
+    "chiropractor": ["chiropractic clinic", "chiropractic office",
+                      "spine care", "back pain clinic"],
+    "physical therapy": ["physical therapist", "PT clinic", "rehab clinic",
+                          "physiotherapy"],
+    "dermatologist": ["dermatology clinic", "skin clinic", "skin doctor"],
+    "veterinarian": ["vet clinic", "animal hospital", "pet clinic",
+                      "veterinary hospital"],
+    "orthodontist": ["orthodontics", "braces clinic", "invisalign provider"],
+    "optometrist": ["eye doctor", "optical shop", "vision center",
+                     "eye care center"],
+    "pediatrician": ["pediatric clinic", "children's doctor", "kids doctor"],
+    # Wellness / beauty
+    "gym": ["fitness center", "fitness studio", "health club", "crossfit"],
+    "salon": ["hair salon", "beauty salon", "styling studio"],
+    "barber": ["barbershop", "men's haircuts", "barber shop"],
+    "med spa": ["medspa", "medical spa", "aesthetic clinic", "botox clinic"],
+    "spa": ["day spa", "wellness spa", "med spa"],
+    "yoga studio": ["yoga", "hot yoga", "yoga classes"],
+    # Home services
+    "plumber": ["plumbing service", "plumbing company", "plumbing contractor",
+                 "emergency plumber"],
+    "electrician": ["electrical service", "electrical contractor",
+                     "electrical company"],
+    "hvac": ["hvac contractor", "heating and cooling", "air conditioning",
+              "ac repair"],
+    "roofer": ["roofing contractor", "roofing company", "roof repair"],
+    "landscaper": ["landscaping company", "lawn care", "landscape design"],
+    "pest control": ["exterminator", "bug control", "pest management"],
+    "cleaning service": ["house cleaning", "maid service", "janitorial"],
+    # Finance / professional
+    "accountant": ["CPA", "accounting firm", "tax preparation", "tax advisor",
+                    "bookkeeper"],
+    "financial advisor": ["financial planner", "wealth manager", "investment advisor"],
+    "insurance agent": ["insurance broker", "insurance agency"],
+    # Real estate
+    "real estate agent": ["realtor", "real estate agency", "realty office"],
+    "realtor": ["real estate agent", "real estate agency"],
+    # Retail
+    "jewelry store": ["jeweler", "jewelry shop", "fine jewelry"],
+    "florist": ["flower shop", "flower delivery", "florists"],
+    # Auto
+    "auto repair": ["mechanic", "auto shop", "car repair", "auto service"],
+    "mechanic": ["auto repair", "auto shop", "car repair"],
 }
+
+
+def _normalize_query(q: str) -> str:
+    """Lowercase + strip trailing 's' from the last word (dental clinics -> dental clinic)."""
+    q = q.strip().lower()
+    if q.endswith("s") and not q.endswith("ss"):
+        # Only strip 's' if removing it leaves a known synonym key
+        singular = q[:-1]
+        if singular in QUERY_SYNONYMS:
+            return singular
+    return q
 
 
 def _query_variants(query: str) -> list:
     """Return ordered list of queries to try, starting with the user's input."""
-    q = query.strip().lower()
+    q = _normalize_query(query)
     variants = [query]  # always try the exact user query first
-    for synonym in QUERY_SYNONYMS.get(q, []):
-        variants.append(synonym)
+
+    # Look up synonyms for normalized form, then for plural-stripped form
+    synonyms = list(QUERY_SYNONYMS.get(q, []))
+    if q.endswith("s") and q[:-1] in QUERY_SYNONYMS:
+        synonyms.extend(QUERY_SYNONYMS[q[:-1]])
+
+    variants.extend(synonyms)
+
+    # Also try the singular form of the original query if it differs
+    raw_lower = query.strip().lower()
+    if raw_lower != q:
+        variants.append(q)
+
     # Dedupe case-insensitively, preserving order
     seen = set()
     out = []
