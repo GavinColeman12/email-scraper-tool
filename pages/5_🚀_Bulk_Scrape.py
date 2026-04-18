@@ -280,8 +280,19 @@ filtered = [
 # ── Pick top N ──
 top_col1, top_col2 = st.columns([3, 1])
 with top_col1:
-    top_n = st.slider("Pick top N", 10, min(200, len(filtered)) if filtered else 10,
-                        min(50, len(filtered)) if filtered else 10)
+    n_filtered = len(filtered)
+    # Streamlit's slider rejects max < min. When fewer than 11 leads match
+    # the filter there's nothing to pick — show an info message instead.
+    if n_filtered <= 10:
+        top_n = n_filtered
+        if n_filtered > 0:
+            st.info(f"Only {n_filtered} lead(s) pass the filter — scraping all of them.")
+        else:
+            st.info("No leads pass the current filter. Widen the filter above to pick a top-N.")
+    else:
+        slider_max = min(200, n_filtered)
+        slider_default = min(50, n_filtered)
+        top_n = st.slider("Pick top N", 10, slider_max, slider_default)
 with top_col2:
     st.metric("Passing filter", len(filtered))
 
