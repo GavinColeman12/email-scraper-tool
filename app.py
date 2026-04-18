@@ -56,7 +56,7 @@ if searches:
                 f"**#{s['id']} — {s['query']}**  \n"
                 f"_{s.get('location', '') or '(no location)'} · "
                 f"{s.get('max_results', '?')} max results · "
-                f"Created {s.get('created_at', '')[:10]}_"
+                f"Created {(s.get('created_at') or '')[:10]}_"
             )
             cols[1].metric("Found", s.get("business_count", 0))
             cols[2].metric("With email", s.get("with_email", 0))
