@@ -147,6 +147,8 @@ def lookup_medical_providers(business_name: str, city: str = "",
             "source": "npi_registry",
             "authority": 15,
             "is_decision_maker": True,
+            # NPI response puts the 10-digit NPI number under "number"
+            "npi": result.get("number"),
         })
 
     return providers[:10]
