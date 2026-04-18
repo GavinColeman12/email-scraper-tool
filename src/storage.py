@@ -169,6 +169,12 @@ def init_db() -> None:
             ("waterfall_verdict", "TEXT"),
             ("waterfall_confidence", "INTEGER"),
             ("headcount", "INTEGER"),
+            # New for v3 triangulation pipeline
+            ("professional_ids", "TEXT"),
+            ("triangulation_pattern", "TEXT"),
+            ("triangulation_confidence", "INTEGER"),
+            ("triangulation_method", "TEXT"),
+            ("email_safe_to_send", "INTEGER DEFAULT 0"),
         ]:
             try:
                 if USE_PG:
@@ -375,7 +381,12 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
                 confidence = {_PARAM},
                 reasoning = {_PARAM},
                 synthesizer = {_PARAM},
-                scraped_at = {_PARAM}
+                scraped_at = {_PARAM},
+                professional_ids = {_PARAM},
+                triangulation_pattern = {_PARAM},
+                triangulation_confidence = {_PARAM},
+                triangulation_method = {_PARAM},
+                email_safe_to_send = {_PARAM}
             WHERE id = {_PARAM}
         """
         cur.execute(sql, (
@@ -389,6 +400,11 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
             scrape_result.get("synthesis_reasoning", ""),
             scrape_result.get("synthesizer", ""),
             datetime.utcnow().isoformat(),
+            scrape_result.get("professional_ids_json") or None,
+            scrape_result.get("triangulation_pattern") or None,
+            scrape_result.get("triangulation_confidence") or None,
+            scrape_result.get("triangulation_method") or None,
+            1 if scrape_result.get("email_safe_to_send") else 0,
             business_id,
         ))
         conn.commit()

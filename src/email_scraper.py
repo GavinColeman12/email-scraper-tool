@@ -1128,3 +1128,102 @@ def scrape_business_emails(business_name: str, website: str,
             result["whois_mismatch"] = True
 
     return result
+
+
+# ============================================================
+# Triangulation entry point (v3 pipeline)
+# ============================================================
+
+def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
+                                confidence_threshold: int = 70) -> dict:
+    """
+    Run the v3 parallel-agent triangulation pipeline against a single business
+    and return a scrape_result dict compatible with storage.update_business_emails.
+    """
+    import json as _json
+    from src.triangulation_pipeline import triangulate_email, domain_from_website
+
+    website = business.get("website", "") or ""
+    domain = domain_from_website(website)
+
+    result = triangulate_email(
+        business_name=business.get("business_name", ""),
+        website=website,
+        domain=domain,
+        address=business.get("address", "") or business.get("location", "") or "",
+        industry=(business.get("business_type") or "").lower(),
+        decision_maker_hint=business.get("contact_name") or None,
+        scraped_emails=business.get("scraped_emails") or [],
+        use_neverbounce=use_neverbounce,
+        confidence_threshold=confidence_threshold,
+    )
+
+    # Map confidence bucket for display
+    conf_int = result.best_email_confidence
+    if conf_int >= 85:
+        conf_bucket = "high"
+    elif conf_int >= 60:
+        conf_bucket = "medium"
+    elif conf_int > 0:
+        conf_bucket = "low"
+    else:
+        conf_bucket = ""
+
+    # Decision-maker name (full) + credential for contact fields
+    dm_name = ""
+    dm_title = ""
+    if result.decision_maker:
+        dm_name = result.decision_maker.full_name
+        dm_title = result.decision_maker.credential or ""
+
+    # JSON payload for professional_ids column (NPI evidence trail)
+    professional_ids = {
+        "decision_maker": ({
+            "name": result.decision_maker.full_name,
+            "npi": result.decision_maker.npi,
+            "credential": result.decision_maker.credential,
+        } if result.decision_maker else None),
+        "all_providers": [
+            {"name": p.full_name, "npi": p.npi, "credential": p.credential}
+            for p in result.all_providers
+        ],
+        "detected_pattern": ({
+            "pattern": result.detected_pattern.pattern_name,
+            "confidence": result.detected_pattern.confidence,
+            "method": result.detected_pattern.method,
+            "evidence_emails": result.detected_pattern.evidence_emails,
+            "evidence_names": result.detected_pattern.evidence_names,
+        } if result.detected_pattern else None),
+        "agents_run": result.agents_run,
+        "agents_succeeded": result.agents_succeeded,
+        "time_seconds": round(result.time_seconds, 2),
+        "cost_estimate": round(result.cost_estimate, 4),
+        "candidate_emails": [
+            {k: c.get(k) for k in ("email", "pattern", "source", "confidence",
+                                    "smtp_valid", "smtp_catchall", "nb_result")}
+            for c in result.candidate_emails
+        ],
+    }
+
+    pattern_name = result.detected_pattern.pattern_name if result.detected_pattern else (
+        result.candidate_emails[0].get("pattern") if result.candidate_emails else None
+    )
+    method = result.detected_pattern.method if result.detected_pattern else "industry_fallback"
+
+    return {
+        "primary_email": result.best_email or "",
+        "scraped_emails": result.evidence_trail.get("discovered_emails", []) or [],
+        "constructed_emails": [c.get("email") for c in result.candidate_emails if c.get("email")],
+        "contact_name": dm_name,
+        "contact_title": dm_title,
+        "email_source": "triangulation",
+        "confidence": conf_bucket,
+        "synthesis_reasoning": " | ".join(result.best_email_evidence[:3]),
+        "synthesizer": "triangulation_v3",
+        # Triangulation-specific fields used by storage.update_business_emails
+        "professional_ids_json": _json.dumps(professional_ids),
+        "triangulation_pattern": pattern_name,
+        "triangulation_confidence": result.best_email_confidence or None,
+        "triangulation_method": method,
+        "email_safe_to_send": result.safe_to_send,
+    }

@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from src import storage, background_jobs
-from src.email_scraper import scrape_business_emails
+from src.email_scraper import scrape_business_emails, scrape_with_triangulation
 from src.deep_scraper import deep_scrape_business_emails
 from src.lead_scoring import compute_lead_quality_score, rank_businesses
 from src.secrets import get_secret
@@ -71,14 +71,15 @@ mode_col1, mode_col2 = st.columns([3, 2])
 with mode_col1:
     mode = st.radio(
         "Mode",
-        ["basic", "verified", "deep"],
+        ["basic", "verified", "deep", "triangulation"],
         format_func=lambda k: {
             "basic": "⚡ Basic — rules + SMTP verification (~5 sec/biz, free, <5% bounce)",
-            "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200, <2% bounce) — Recommended",
-            "deep": f"🧠 Deep — 4 agents + Sonnet + SMTP + Haiku (~10 sec/biz, ~$2/200, <2% bounce)",
+            "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200, <2% bounce)",
+            "deep": "🧠 Deep — 4 agents + Sonnet + SMTP + Haiku (~10 sec/biz, ~$2/200, <2% bounce)",
+            "triangulation": "🎯 Triangulation (recommended) — 5 parallel agents + NPI + NeverBounce gate (~45s/biz, ~$5-6/100)",
         }[k],
         horizontal=False,
-        index=1,  # default to Verified
+        index=3,  # default to Triangulation
     )
 with mode_col2:
     parallelism = st.slider(
@@ -93,6 +94,13 @@ if mode == "verified":
 elif mode == "deep":
     cost = len(pending) * 0.02
     st.caption(f"💰 Deep mode estimated cost: ~${cost:.2f} for {len(pending)} businesses")
+elif mode == "triangulation":
+    cost = len(pending) * 0.055
+    st.caption(
+        f"💰 Triangulation mode estimated cost: ~${cost:.2f} for {len(pending)} businesses "
+        "(~$0.05-0.06/biz: 2 SearchApi calls + 1 NeverBounce verify per business). "
+        "Only the top candidate is NeverBounced — SMTP probes are free."
+    )
 
 # ── Start button ──
 bc1, bc2 = st.columns([3, 1])
@@ -119,7 +127,11 @@ def _scrape_worker(biz, job_id):
         business_type = biz.get("business_type", "") or ""
         phone = biz.get("phone", "") or ""
 
-        if mode == "deep":
+        if mode == "triangulation":
+            # v3 parallel-agent pipeline: NPI + website + Google + press
+            # + SMTP + NeverBounce gate.
+            result = scrape_with_triangulation(biz, use_neverbounce=True)
+        elif mode == "deep":
             result = deep_scrape_business_emails(
                 business_name=biz["business_name"],
                 website=biz.get("website", ""),
@@ -178,6 +190,7 @@ if start_clicked and pending:
         "deep": "bulk_deep_scrape",
         "verified": "bulk_verified_scrape",
         "basic": "bulk_scrape",
+        "triangulation": "bulk_triangulation_scrape",
     }[mode]
     job_id = background_jobs.start(
         job_type=job_type,
