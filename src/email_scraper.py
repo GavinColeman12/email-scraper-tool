@@ -1147,14 +1147,23 @@ def scrape_business_emails(business_name: str, website: str,
 def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
                                 confidence_threshold: int = 70) -> dict:
     """
-    Run the v3 parallel-agent triangulation pipeline against a single business
-    and return a scrape_result dict compatible with storage.update_business_emails.
+    Universal triangulation entry point. Runs the v5 universal_pipeline
+    (industry-agnostic owner discovery + SQLite cache + NeverBounce) and
+    adapts the TriangulationResult into a scrape_result dict that
+    storage.update_business_emails can persist.
     """
     import json as _json
-    from src.triangulation_pipeline import triangulate_email, domain_from_website
+    import re as _re
+    from urllib.parse import urlparse as _urlparse
+    from src.universal_pipeline import triangulate_email
 
     website = business.get("website", "") or ""
-    domain = domain_from_website(website)
+    try:
+        domain = _urlparse(
+            website if website.startswith("http") else "https://" + website
+        ).netloc.replace("www.", "")
+    except Exception:
+        domain = ""
 
     result = triangulate_email(
         business_name=business.get("business_name", ""),
@@ -1179,23 +1188,45 @@ def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
     else:
         conf_bucket = ""
 
-    # Decision-maker name (full) + credential for contact fields
+    # Decision-maker name (full) + title for contact fields. Universal
+    # pipeline's OwnerCandidate uses `title` (e.g. "Owner", "DDS");
+    # extract an NPI number from the NPI provider-view source_url when
+    # the owner came from the NPI agent.
     dm_name = ""
     dm_title = ""
+    dm_npi = None
     if result.decision_maker:
         dm_name = result.decision_maker.full_name
-        dm_title = result.decision_maker.credential or ""
+        dm_title = getattr(result.decision_maker, "title", "") or ""
+        src_url = getattr(result.decision_maker, "source_url", "") or ""
+        m = _re.search(r"/provider-view/(\d{10})", src_url)
+        if m:
+            dm_npi = m.group(1)
 
-    # JSON payload for professional_ids column (NPI evidence trail)
+    def _npi_from_owner(o):
+        su = getattr(o, "source_url", "") or ""
+        mm = _re.search(r"/provider-view/(\d{10})", su)
+        return mm.group(1) if mm else None
+
+    # JSON payload for professional_ids column (evidence trail).
+    # Schema is preserved across pipeline versions for backward compat.
+    owners_list = getattr(result, "all_owners", None) or getattr(result, "all_providers", []) or []
     professional_ids = {
         "decision_maker": ({
             "name": result.decision_maker.full_name,
-            "npi": result.decision_maker.npi,
-            "credential": result.decision_maker.credential,
+            "npi": dm_npi,
+            "credential": dm_title,
+            "source": getattr(result.decision_maker, "source", ""),
+            "source_url": getattr(result.decision_maker, "source_url", ""),
         } if result.decision_maker else None),
         "all_providers": [
-            {"name": p.full_name, "npi": p.npi, "credential": p.credential}
-            for p in result.all_providers
+            {
+                "name": p.full_name,
+                "npi": _npi_from_owner(p),
+                "credential": getattr(p, "title", "") or getattr(p, "credential", ""),
+                "source": getattr(p, "source", ""),
+            }
+            for p in owners_list
         ],
         "detected_pattern": ({
             "pattern": result.detected_pattern.pattern_name,
@@ -1207,12 +1238,13 @@ def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
         "agents_run": result.agents_run,
         "agents_succeeded": result.agents_succeeded,
         "time_seconds": round(result.time_seconds, 2),
-        "cost_estimate": round(result.cost_estimate, 4),
+        "cost_estimate": round(getattr(result, "cost_estimate", 0.0), 4),
         "candidate_emails": [
             {k: c.get(k) for k in ("email", "pattern", "source", "confidence",
                                     "smtp_valid", "smtp_catchall", "nb_result")}
             for c in result.candidate_emails
         ],
+        "risky_catchall": getattr(result, "risky_catchall", False),
     }
 
     pattern_name = result.detected_pattern.pattern_name if result.detected_pattern else (
@@ -1229,7 +1261,7 @@ def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
         "email_source": "triangulation",
         "confidence": conf_bucket,
         "synthesis_reasoning": " | ".join(result.best_email_evidence[:3]),
-        "synthesizer": "triangulation_v3",
+        "synthesizer": "universal_v5",
         # Triangulation-specific fields used by storage.update_business_emails
         "professional_ids_json": _json.dumps(professional_ids),
         "triangulation_pattern": pattern_name,
