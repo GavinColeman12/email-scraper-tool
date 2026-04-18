@@ -374,6 +374,44 @@ if rows:
                 except Exception:
                     pid = {"_error": "invalid JSON"}
                 st.json(pid, expanded=False)
+
+        # ── Download full triangulation run as JSON ──────────────
+        st.markdown("**Download the full run for this search**")
+        st.caption(
+            "One JSON file containing every triangulated business in this "
+            "search — agents that ran, NPI providers found, detected pattern, "
+            "candidate ranking with SMTP + NeverBounce results, evidence "
+            "trail, and cost. Open it in any text editor to trace the flow."
+        )
+        full_run = []
+        for b in triangulated:
+            try:
+                pid_data = _dbg_json.loads(b.get("professional_ids") or "{}")
+            except Exception:
+                pid_data = {"_error": "invalid JSON"}
+            full_run.append({
+                "business_id": b["id"],
+                "business_name": b["business_name"],
+                "address": b.get("address"),
+                "website": b.get("website"),
+                "business_type": b.get("business_type"),
+                "primary_email_picked": b.get("primary_email"),
+                "contact_name": b.get("contact_name"),
+                "triangulation_pattern": b.get("triangulation_pattern"),
+                "triangulation_confidence": b.get("triangulation_confidence"),
+                "email_safe_to_send": bool(b.get("email_safe_to_send")),
+                "email_status_post_verify": b.get("email_status"),
+                "email_verification_reason": b.get("email_verification_reason"),
+                "reasoning": b.get("reasoning"),
+                "evidence": pid_data,
+            })
+        st.download_button(
+            "📥 Download full triangulation run (JSON)",
+            data=_dbg_json.dumps(full_run, indent=2, default=str),
+            file_name=f"triangulation_run_search_{search_id}.json",
+            mime="application/json",
+            help="Every triangulation decision for this search in one file.",
+        )
 else:
     st.info("No businesses match the current filter.")
 

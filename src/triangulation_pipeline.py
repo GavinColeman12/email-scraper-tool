@@ -213,16 +213,38 @@ def triangulate_email(
         if any(c.get("smtp_valid") for c in candidates):
             result.agents_succeeded.append("smtp_probe")
 
-        # NeverBounce on the top candidate only — cost control
-        top = max(candidates, key=lambda c: _candidate_confidence(c, result.detected_pattern))
-        if use_neverbounce and top.get("smtp_valid"):
-            try:
-                nb = nb_verify(top["email"])
-                top["nb_valid"] = nb.safe_to_send
-                top["nb_result"] = nb.result
-                result.cost_estimate += 0.003
-            except Exception as e:
-                top["nb_error"] = str(e)
+        # NeverBounce on top candidates — runs REGARDLESS of SMTP result
+        # because hosted envs (Streamlit Cloud, most VMs) block port 25, so
+        # smtp_valid is almost always False in production. If NB says the
+        # top candidate is INVALID, walk down the candidate list until we
+        # find a VALID one (or run out of NB budget: max 3 verifies).
+        if use_neverbounce:
+            ranked_pre = sorted(
+                candidates,
+                key=lambda c: _candidate_confidence(c, result.detected_pattern),
+                reverse=True,
+            )
+            NB_BUDGET = 4  # at most 4 NeverBounce calls per business (~$0.012)
+            verified_count = 0
+            for cand in ranked_pre:
+                if verified_count >= NB_BUDGET:
+                    break
+                try:
+                    nb = nb_verify(cand["email"])
+                    cand["nb_valid"] = nb.safe_to_send
+                    cand["nb_result"] = nb.result
+                    result.cost_estimate += 0.003
+                    verified_count += 1
+                    # Keep going past the top candidate if NB rejected it
+                    if nb.result == "valid":
+                        break
+                    if nb.result == "invalid":
+                        continue  # try next candidate
+                    # catchall/unknown — stop (no point paying more)
+                    break
+                except Exception as e:
+                    cand["nb_error"] = str(e)
+                    break
 
         # Final ranking
         for c in candidates:
@@ -518,14 +540,21 @@ def _generate_candidates(
             })
             seen.add(email)
 
-    # Priority 2: first.last@ fallback
+    # Priority 2: first.last@ fallback. If the decision-maker is actually
+    # in the NPI provider list (not a synthetic from the website hint),
+    # that's meaningful — bump the base confidence so an NPI-verified DM
+    # with first.last can clear the RISKY/SAFE threshold even without
+    # SMTP/NeverBounce lift.
+    npi_verified = bool(decision_maker.npi) or decision_maker.source == "npi"
+    base_conf = 60 if npi_verified else 45
     fl = build_email("first.last", first, last, domain)
     if fl and fl not in seen:
         candidates.append({
             "email": fl,
             "pattern": "first.last",
             "source": "first_last_fallback",
-            "base_confidence": 45,
+            "base_confidence": base_conf,
+            "npi_verified_dm": npi_verified,
         })
         seen.add(fl)
 
