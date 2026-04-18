@@ -104,6 +104,59 @@ if results:
     st.divider()
     st.subheader("Preview")
 
+    # ── Pre-save filters (hide low-quality leads BEFORE they hit the
+    # scrape queue — saves API spend on businesses you'd never email) ──
+    with st.expander("🔍 Quality filters (applied before save)", expanded=True):
+        fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1])
+        min_reviews = fc1.number_input(
+            "Min reviews", min_value=0, max_value=100000, value=0, step=10,
+            help="Only include businesses with at least this many Google reviews. "
+                 "Strong signal of real, active business. 50+ is a good baseline.",
+        )
+        min_rating = fc2.number_input(
+            "Min rating", min_value=0.0, max_value=5.0, value=0.0, step=0.1,
+            format="%.1f",
+            help="Only include businesses with at least this star rating. "
+                 "4.0+ filters out problem businesses that won't convert.",
+        )
+        max_rating = fc3.number_input(
+            "Max rating", min_value=0.0, max_value=5.0, value=5.0, step=0.1,
+            format="%.1f",
+            help="Upper bound. Useful when you want mid-tier businesses that have "
+                 "room for improvement (e.g. 4.0-4.6).",
+        )
+        require_website = fc4.checkbox(
+            "Must have website", value=False,
+            help="Emails can only be scraped from businesses with websites. "
+                 "Filter them out here instead of saving empties.",
+        )
+
+    def _passes_filters(b):
+        rev = b.get("review_count") or 0
+        rat = b.get("rating") or 0
+        if rev < min_reviews:
+            return False
+        if rat < min_rating or rat > max_rating:
+            return False
+        if require_website and not b.get("website"):
+            return False
+        return True
+
+    all_results = results
+    results = [b for b in all_results if _passes_filters(b)]
+    hidden = len(all_results) - len(results)
+    if hidden > 0:
+        st.caption(
+            f"🔍 Filters hide **{hidden}** of {len(all_results)} results "
+            f"(min {min_reviews} reviews, rating {min_rating:.1f}–{max_rating:.1f}"
+            f"{', website required' if require_website else ''}). "
+            "Adjust above to widen."
+        )
+
+    if not results:
+        st.warning("No businesses match the current filters. Relax the thresholds above.")
+        st.stop()
+
     df = pd.DataFrame([{
         "Include": True,
         "Name": b.get("business_name"),
