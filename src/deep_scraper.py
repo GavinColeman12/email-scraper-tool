@@ -140,7 +140,16 @@ def _synthesize_rules_based(business_name, website, domain,
     def build_email(first, last):
         if email_pattern:
             return _build_email_from_pattern(first, last, domain, email_pattern)
-        return f"{(first or '').lower()}@{domain}" if first else ""
+        # No pattern detected — default to first.last@ (dominant B2B prior)
+        # when we have both names, otherwise first@. Never fall through to
+        # info@/contact@ here; that's the Tier 6 generic fallback.
+        first = (first or "").lower()
+        last = (last or "").lower()
+        if first and last:
+            return f"{first}.{last}@{domain}"
+        if first:
+            return f"{first}@{domain}"
+        return ""
 
     # Collect all people across sources
     all_people = []

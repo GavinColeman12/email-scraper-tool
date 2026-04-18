@@ -8,8 +8,10 @@ import pandas as pd
 import streamlit as st
 
 from src import storage, background_jobs
-from src.email_scraper import scrape_business_emails, scrape_with_triangulation
+from src.email_scraper import scrape_business_emails
 from src.deep_scraper import deep_scrape_business_emails
+# Lazy-imported inside the worker to avoid hard-blocking the page if the
+# triangulation module has any import-time issue on a given runtime.
 from src.lead_scoring import compute_lead_quality_score, rank_businesses
 from src.secrets import get_secret
 
@@ -129,7 +131,9 @@ def _scrape_worker(biz, job_id):
 
         if mode == "triangulation":
             # v3 parallel-agent pipeline: NPI + website + Google + press
-            # + SMTP + NeverBounce gate.
+            # + SMTP + NeverBounce gate. Lazy-imported so any issue in the
+            # pipeline module surfaces at run-time, not page-load time.
+            from src.email_scraper import scrape_with_triangulation
             result = scrape_with_triangulation(biz, use_neverbounce=True)
         elif mode == "deep":
             result = deep_scrape_business_emails(

@@ -51,37 +51,56 @@ st.caption(
     "(homepage + contact/about/team) and extracts emails via regex + mailto: links."
 )
 
-# ── Deep research toggle ──
+# ── Research mode (3 options) ──
 try:
     has_claude = bool(get_secret("ANTHROPIC_API_KEY"))
 except Exception:
     has_claude = False
 
-st.markdown("### Research mode")
-mode_col1, mode_col2 = st.columns([3, 2])
-with mode_col1:
-    deep_mode = st.checkbox(
-        "🧠 **Deep research mode** (multi-agent + AI synthesis)",
-        value=False,
-        help="Runs 4 research agents in parallel (website, schema.org, LinkedIn, "
-             "press/news search) then uses Claude AI to pick the best decision-maker "
-             "email with reasoning. Much higher accuracy. Costs ~$0.02/business "
-             "(1 extra SearchApi call + Claude Sonnet call)."
-    )
-with mode_col2:
-    if deep_mode:
-        if has_claude:
-            st.caption("✅ Claude Sonnet synthesizer enabled")
-        else:
-            st.caption("⚠️ No `ANTHROPIC_API_KEY` — will use rules-based synthesizer (free but less accurate)")
+try:
+    from src.neverbounce import is_available as _nb_available
+    has_nb = _nb_available()
+except Exception:
+    has_nb = False
 
-if deep_mode:
+st.markdown("### Research mode")
+mode_options = ["basic", "deep", "triangulation"]
+mode_labels = {
+    "basic": "⚡ Basic — rules + scraping (~5s/biz, free)",
+    "deep": "🧠 Deep research — 4 agents + Claude (~$0.02/biz)",
+    "triangulation": (
+        "🎯 **Triangulation (recommended)** — NPI + website + Google + press + "
+        "SMTP + NeverBounce gate (~$0.05/biz, 30-60s/biz)"
+    ),
+}
+research_mode = st.radio(
+    "Mode",
+    mode_options,
+    format_func=lambda k: mode_labels[k],
+    index=2,  # triangulation default
+)
+deep_mode = research_mode == "deep"  # backward-compat alias for worker below
+
+if research_mode == "deep":
     est_cost_per = 0.02 if has_claude else 0.005
     total_est = len(pending) * est_cost_per
+    st.info(f"💰 Deep research estimated cost: **${total_est:.2f}** for {len(pending)} businesses (~${est_cost_per:.3f}/business)")
+    if has_claude:
+        st.caption("✅ Claude Sonnet synthesizer enabled")
+    else:
+        st.caption("⚠️ No `ANTHROPIC_API_KEY` — will use rules-based synthesizer")
+elif research_mode == "triangulation":
+    est_cost_per = 0.055
+    total_est = len(pending) * est_cost_per
     st.info(
-        f"💰 Deep research estimated cost: **${total_est:.2f}** for {len(pending)} businesses "
-        f"(~${est_cost_per:.3f}/business)"
+        f"💰 Triangulation estimated cost: **${total_est:.2f}** for {len(pending)} businesses "
+        f"(~${est_cost_per:.3f}/business). 4 parallel agents run per business; only the "
+        "top candidate gets NeverBounced."
     )
+    flags = []
+    flags.append("✅ NeverBounce" if has_nb else "⚠️ No NeverBounce key — free-tier verify only")
+    flags.append("✅ NPI (dental/medical)" if True else "")
+    st.caption(" · ".join(f for f in flags if f))
 
 # ── Enhance existing results with Claude ──
 st.markdown("### 🧠 Enhance existing results with Claude AI")
@@ -167,7 +186,11 @@ if st.button(f"▶️ Scrape {len(pending)} pending businesses",
         # Parse city from address for more targeted LinkedIn search
         addr = biz.get("address", "") or biz.get("location", "")
         city = addr.split(",")[0].strip() if addr else ""
-        if deep_mode:
+        if research_mode == "triangulation":
+            # Lazy import so any module-load issue surfaces here, not at page load
+            from src.email_scraper import scrape_with_triangulation
+            result = scrape_with_triangulation(biz, use_neverbounce=True)
+        elif deep_mode:
             result = deep_scrape_business_emails(
                 business_name=biz["business_name"],
                 website=biz.get("website", ""),
@@ -186,7 +209,7 @@ if st.button(f"▶️ Scrape {len(pending)} pending businesses",
 
     completed = 0
     scraped_so_far = []
-    max_workers = 4 if deep_mode else 8
+    max_workers = 4 if deep_mode else (3 if research_mode == "triangulation" else 8)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_scrape_one, b) for b in pending]
         for fut in as_completed(futures):
@@ -314,6 +337,43 @@ if rows:
                     unsafe_allow_html=True,
                 )
                 st.divider()
+
+    # ── Triangulation debug: JSON view of professional_ids ──
+    import json as _dbg_json
+    triangulated = [b for b in filtered if b.get("professional_ids")]
+    if triangulated:
+        with st.expander(
+            f"🔬 Triangulation debug ({len(triangulated)} businesses) — agents, providers, candidates, pattern evidence"
+        ):
+            st.caption(
+                "Every triangulated business shows: which agents ran, what NPI providers "
+                "were found, the pattern we detected, the full candidate ranking (SMTP + "
+                "NeverBounce results), and total cost. Use this to debug why the pipeline "
+                "picked a particular email."
+            )
+            dbg_pick = st.selectbox(
+                "Business",
+                options=[b["id"] for b in triangulated],
+                format_func=lambda i: next(
+                    (f"{b['business_name']} → {b.get('primary_email') or '(none)'}"
+                     for b in triangulated if b["id"] == i), str(i)),
+                key="dbg_pick",
+            )
+            chosen = next((b for b in triangulated if b["id"] == dbg_pick), None)
+            if chosen:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Pattern", chosen.get("triangulation_pattern") or "—")
+                c2.metric("Confidence", chosen.get("triangulation_confidence") or 0)
+                c3.metric(
+                    "Safe to send?",
+                    "✅ Yes" if chosen.get("email_safe_to_send") else "❌ No",
+                )
+                c4.metric("Method", chosen.get("triangulation_method") or "—")
+                try:
+                    pid = _dbg_json.loads(chosen.get("professional_ids") or "{}")
+                except Exception:
+                    pid = {"_error": "invalid JSON"}
+                st.json(pid, expanded=False)
 else:
     st.info("No businesses match the current filter.")
 

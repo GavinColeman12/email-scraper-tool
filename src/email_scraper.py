@@ -599,7 +599,17 @@ def _pick_top_contact(scraped_emails: list, constructed_emails: list,
     def build(first, last):
         if pattern:
             return _build_email_from_pattern(first, last, domain, pattern)
-        return f"{(first or '').lower()}@{domain}" if first else ""
+        # No detected pattern — default to first.last@ (dominant B2B prior for
+        # 10+ employee practices) when we have both; otherwise fall back to
+        # first@. Never fall back to info@ here — that's Tier 6, not a
+        # person-specific email.
+        first = (first or "").lower()
+        last = (last or "").lower()
+        if first and last:
+            return f"{first}.{last}@{domain}"
+        if first:
+            return f"{first}@{domain}"
+        return ""
 
     # ── Tier 1a: Named personal scraped email ───────────────────────────
     for e in scraped_emails:
