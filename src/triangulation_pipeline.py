@@ -599,23 +599,27 @@ def _probe_smtp(email: str) -> dict:
 def _candidate_confidence(candidate: dict, detected_pattern: Optional[DetectedPattern]) -> int:
     score = candidate.get("base_confidence", 30)
 
-    # NeverBounce is the strongest signal
-    if candidate.get("nb_valid"):
-        score += 35
-    elif candidate.get("nb_result") == "invalid":
+    # Hard-fail signals
+    if candidate.get("nb_result") == "invalid":
         return 0
-    elif candidate.get("nb_result") == "catchall":
-        score += 5
 
-    # SMTP signals
+    # Soft signals
+    if candidate.get("nb_result") == "catchall":
+        score += 5
     if candidate.get("smtp_valid") and not candidate.get("smtp_catchall"):
         score += 20
     if candidate.get("smtp_catchall"):
         score -= 10
-
-    # Boost when the candidate uses the triangulated pattern
     if detected_pattern and candidate.get("pattern") == detected_pattern.pattern_name:
         score += 15
+
+    # NeverBounce-valid is AUTHORITATIVE — when NB explicitly says this
+    # mailbox accepts mail, we clear the SAFE_TO_SEND threshold regardless
+    # of which pattern we guessed. Without this floor, patterns with a
+    # low base prior (flast ~11, drlast ~5) would never reach 70 even
+    # when the paid NeverBounce gate says VALID.
+    if candidate.get("nb_valid"):
+        score = max(score + 35, 85)
 
     return max(0, min(100, score))
 
@@ -642,9 +646,19 @@ def _match_hint_to_provider(
     hint_lower = hint.lower()
     # Word-boundary match — avoids false positives like "an" inside "hasan"
     hint_tokens = set(re.findall(r"[a-z]+", hint_lower))
+    # Best: both first AND last name match (disambiguates when two providers
+    # share a surname, e.g. Donald Meiners vs Zachary Meiners).
+    for p in providers:
+        fn = p.first_name.lower() if p.first_name else ""
+        ln = p.last_name.lower() if p.last_name else ""
+        if (len(ln) >= 3 and ln in hint_tokens
+                and len(fn) >= 3 and fn in hint_tokens):
+            return p
+    # Last-name-only fallback
     for p in providers:
         if p.last_name and len(p.last_name) >= 3 and p.last_name.lower() in hint_tokens:
             return p
+    # First-name-only fallback
     for p in providers:
         if p.first_name and len(p.first_name) >= 3 and p.first_name.lower() in hint_tokens:
             return p
