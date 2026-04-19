@@ -965,10 +965,13 @@ def _generate_candidates(
     detected_pattern: Optional[DetectedPattern],
     industry: str,
     allow_first_only_pattern: bool = False,
+    scraped_emails: Optional[list[str]] = None,
 ) -> list[dict]:
     first, last = decision_maker.first_name, decision_maker.last_name
     candidates: list[dict] = []
     seen: set[str] = set()
+    scraped_emails = scraped_emails or []
+    d_lower = domain.lower()
 
     # Guardrail: the bare `first@domain` pattern is off by default. It's
     # only valid for solo practitioners and a few consumer-facing verticals
@@ -976,6 +979,30 @@ def _generate_candidates(
     # mailbox. Opt-in only (allow_first_only_pattern=True).
     def _block_first_only(pat: str) -> bool:
         return pat == "first" and not allow_first_only_pattern
+
+    # Emit scraped-direct candidates FIRST (up to 2 slots). These carry
+    # the highest source-evidence weight in the scorer because the business
+    # literally published them. Scorer's specificity cap correctly ranks
+    # generic inboxes (info@) below personal mailboxes (drjones@).
+    scraped_slot_budget = 2
+    for scraped in scraped_emails:
+        if scraped_slot_budget <= 0:
+            break
+        email = (scraped or "").lower().strip()
+        if not email or "@" not in email:
+            continue
+        if not email.endswith("@" + d_lower):
+            continue
+        if email in seen:
+            continue
+        candidates.append({
+            "email": email,
+            "pattern": "scraped",
+            "source": "scraped_direct",
+            "base_confidence": 75,
+        })
+        seen.add(email)
+        scraped_slot_budget -= 1
 
     if detected_pattern and detected_pattern.confidence >= 70 \
             and not _block_first_only(detected_pattern.pattern_name):
@@ -1236,6 +1263,7 @@ def triangulate_email(
     candidates = _generate_candidates(
         result.decision_maker, domain, result.detected_pattern, industry,
         allow_first_only_pattern=allow_first_only_pattern,
+        scraped_emails=list(all_emails),
     )
 
     if not candidates:

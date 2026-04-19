@@ -1,184 +1,198 @@
 """
-Lead quality scoring — produce a 0-100 composite score per business
-so you can sort and pick the top N high-quality leads from a large batch.
+Lead quality scoring — thin compatibility wrapper around src.email_scoring.
 
-Score components (weighted):
-  40% — Email confidence (scraped > cross-verified > constructed > generic)
-  20% — Business rating (Google Maps 0-5 stars)
-  15% — Review count (more reviews = more established)
-  10% — Website present
-  15% — Decision maker identified (has name + title)
+Historical layout (rating/reviews/website as top-level components) is gone.
+The identity-heavy scorer lives in `email_scoring.py`; this module maps the
+business-dict shape used by storage and UI pages into ScoringInputs and
+delegates.
+
+Public surface kept for backward compatibility:
+  - compute_lead_quality_score(business) -> {score, breakdown, tier}
+  - rank_businesses(list, top_n) -> list
 """
+from __future__ import annotations
+
+from typing import Optional
+
+from .email_scoring import (
+    ScoringInputs,
+    score_email_candidate,
+    Specificity,
+)
 
 
-# Confidence → base points (out of 40)
-_EMAIL_CONFIDENCE_POINTS = {
-    "high": 40,
-    "medium": 25,
-    "low": 10,
-    "skip": -100,   # SKIP businesses get a score killer — drops them to 0
-    "": 0,
-    None: 0,
-}
-
-# Source → bonus points (caps the confidence score at 40 total)
-_EMAIL_SOURCE_BONUS = {
-    "scraped_mailto_or_regex": 0,          # already high
-    "scraped_personal_email": 0,            # already high
-    "team_page_verified_by_linkedin": 0,    # already high
-    "linkedin_verified_by_website": 0,      # already high
-    "team_page_decision_maker": 2,          # solid medium
-    "constructed_from_linkedin": 2,
-    "constructed_from_website_decision_maker": 1,
-    "team_page_person": 0,
-    "constructed_from_website_name": -3,    # weaker medium
-    "generic_inbox": -5,                     # penalize generic
-    "generic_fallback": -5,
-}
-
-# Verification status → adjustment
-_VERIFY_ADJUSTMENT = {
-    "valid": 0,           # no adjustment for passing
-    "risky": -5,          # catch-all — uncertain
-    "invalid": -40,       # kill the score
-    "disposable": -40,
-    "unknown": -2,
-    "": 0,
-    None: 0,
-}
+def _split_owner_name(full_name: str) -> tuple[str, str]:
+    parts = (full_name or "").strip().split()
+    if len(parts) >= 2:
+        return parts[0], parts[-1]
+    if len(parts) == 1:
+        return parts[0], ""
+    return "", ""
 
 
-def _rating_points(rating) -> int:
-    """Convert Google rating to 0-20 points."""
-    try:
-        r = float(rating or 0)
-    except Exception:
-        return 0
-    if r >= 4.8:
-        return 20
-    if r >= 4.5:
-        return 17
-    if r >= 4.0:
-        return 13
-    if r >= 3.5:
-        return 8
-    if r >= 3.0:
-        return 4
-    return 0
+def _map_confidence_to_int(conf_str: str) -> int:
+    return {"high": 90, "medium": 70, "low": 40}.get(
+        (conf_str or "").lower(), 0
+    )
 
 
-def _review_count_points(count) -> int:
-    """Convert review count to 0-15 points on a log-ish curve."""
-    try:
-        n = int(count or 0)
-    except Exception:
-        return 0
-    if n >= 500:
-        return 15
-    if n >= 200:
-        return 13
-    if n >= 100:
-        return 11
-    if n >= 50:
-        return 8
-    if n >= 25:
-        return 5
-    if n >= 10:
-        return 3
-    if n > 0:
-        return 1
-    return 0
+def _derive_source_flags(email_source: str) -> tuple[bool, bool, bool, bool]:
+    """Return (was_scraped_direct, was_found_via_search,
+    was_generated_from_pattern, pattern_triangulated)."""
+    s = (email_source or "").lower()
+    scraped = any(k in s for k in (
+        "scraped", "mailto", "regex", "personal_email",
+        "team_page_decision_maker", "team_page_person",
+        "team_page_verified",
+    ))
+    search = any(k in s for k in ("linkedin", "google_search"))
+    # "constructed_from_pattern" or "constructed_from_linkedin" or
+    # "constructed_from_website_*" all count as pattern-generated.
+    pattern_generated = "constructed" in s or s in (
+        "detected_pattern", "first_last_fallback", "industry_prior", "",
+    )
+    triangulated = s == "detected_pattern" or "triangulated" in s
+    return scraped, search, pattern_generated, triangulated
 
 
-def _website_points(website) -> int:
-    """10 pts if has a real website, 0 otherwise."""
-    if not website:
-        return 0
-    w = str(website).lower().strip()
-    if w in ("—", "-", "none", "null", ""):
-        return 0
-    if "facebook.com" in w or "instagram.com" in w or "linkedin.com" in w:
-        # Social-only presence is weaker than a real domain
-        return 4
-    return 10
+def _nb_flags(email_status: str) -> tuple[bool, bool, bool, bool]:
+    """(nb_valid, nb_invalid, nb_catchall, nb_unknown)."""
+    st = (email_status or "").lower()
+    return (
+        st == "valid",
+        st in ("invalid", "disposable"),
+        st in ("risky", "catchall"),
+        st in ("", "unknown"),
+    )
 
 
-def _decision_maker_points(business: dict) -> int:
-    """15 pts if both contact name AND title are present."""
-    name = (business.get("contact_name") or "").strip()
-    title = (business.get("contact_title") or "").strip()
-    if name and title:
-        return 15
-    if name:
-        return 10
-    if title:
-        return 4
-    return 0
+def _business_dict_to_inputs(business: dict) -> Optional[ScoringInputs]:
+    email = (
+        business.get("best_email")
+        or business.get("primary_email")
+        or business.get("email")
+        or ""
+    )
+    if not email:
+        return None
+
+    owner_full = business.get("contact_name") or ""
+    owner_first, owner_last = _split_owner_name(owner_full)
+    owner_title = (business.get("contact_title") or "").strip()
+    owner_conf = _map_confidence_to_int(
+        business.get("contact_confidence") or business.get("owner_confidence") or ""
+    )
+
+    business_name = (business.get("business_name") or "").lower()
+    last_in_business = bool(
+        owner_last and owner_last.lower() in business_name
+    )
+
+    scraped, search, generated, triangulated = _derive_source_flags(
+        business.get("email_source") or ""
+    )
+    nb_valid, nb_invalid, nb_catchall, nb_unknown = _nb_flags(
+        business.get("email_status") or ""
+    )
+
+    # Triangulation applies PER-EMAIL. A scraped info@ at a domain that
+    # has a triangulated pattern for SOMEONE ELSE'S email doesn't inherit
+    # that proof. So: only credit triangulation if this specific email's
+    # local-part is consistent with the detected pattern for this owner.
+    prof = business.get("professional_ids") or {}
+    detected = (prof or {}).get("detected_pattern") or {}
+    local = email.split("@", 1)[0].lower() if "@" in email else ""
+    email_matches_pattern = False
+    if detected and owner_first and owner_last and local:
+        f, l = owner_first.lower(), owner_last.lower()
+        pat_to_local = {
+            "first.last": f"{f}.{l}",
+            "firstlast": f"{f}{l}",
+            "flast": f"{f[0]}{l}" if f else "",
+            "f.last": f"{f[0]}.{l}" if f else "",
+            "first": f,
+            "last": l,
+            "drlast": f"dr{l}",
+            "dr.last": f"dr.{l}",
+            "last.first": f"{l}.{f}",
+            "lastf": f"{l}{f[0]}" if f else "",
+        }
+        expected = pat_to_local.get(detected.get("pattern", "").lower(), "")
+        email_matches_pattern = bool(expected) and local == expected
+
+    pattern_confidence = int(detected.get("confidence") or 0) if email_matches_pattern else 0
+    pattern_evidence_count = (
+        len(detected.get("evidence_emails") or [])
+        if email_matches_pattern else 0
+    )
+
+    return ScoringInputs(
+        email=email,
+        owner_first=owner_first,
+        owner_last=owner_last,
+        owner_confidence=owner_conf,
+        owner_title=owner_title,
+        was_scraped_direct=scraped,
+        was_found_via_search=search,
+        was_generated_from_pattern=generated,
+        pattern_triangulated=email_matches_pattern,
+        pattern_confidence=pattern_confidence,
+        pattern_evidence_count=pattern_evidence_count,
+        nb_valid=nb_valid,
+        nb_invalid=nb_invalid,
+        nb_catchall=nb_catchall,
+        nb_unknown=nb_unknown,
+        smtp_valid=bool(business.get("smtp_valid")),
+        smtp_catchall=bool(business.get("smtp_catchall")),
+        is_catchall_domain=bool(
+            business.get("is_catchall_domain")
+            or business.get("email_status") in ("catchall", "risky")
+        ),
+        owner_last_name_in_business=last_in_business,
+    )
 
 
 def compute_lead_quality_score(business: dict) -> dict:
     """
-    Return a dict with the composite score + a breakdown explaining how
-    each component contributed. UI can show the breakdown on hover.
+    Return {"score": int, "breakdown": {...}, "tier": "A".."F"}.
+    Identity-heavy: rating, review count, and website presence NOT factors
+    (we pre-filter to sites with websites; rating/reviews are selection
+    criteria, not outreach-quality signals).
     """
-    # Email confidence component (0-40)
-    confidence = business.get("confidence") or ""
-    source = business.get("email_source") or ""
-    verify_status = business.get("email_status") or ""
-
-    # SKIP confidence is a hard kill — no point scoring other components
-    # when the business has no deliverable email.
-    if confidence == "skip":
+    if (business.get("confidence") or "").lower() == "skip":
         return {
             "score": 0,
-            "breakdown": {"email_confidence": 0, "rating": 0, "reviews": 0,
-                           "website": 0, "decision_maker": 0},
+            "breakdown": {
+                "source_evidence": 0, "triangulation": 0,
+                "verification": 0, "owner_context": 0, "synergy": 0,
+            },
             "tier": "F",
         }
 
-    email_pts = _EMAIL_CONFIDENCE_POINTS.get(confidence, 0)
-    email_pts += _EMAIL_SOURCE_BONUS.get(source, 0)
-    email_pts += _VERIFY_ADJUSTMENT.get(verify_status, 0)
-    email_pts = max(0, min(40, email_pts))
+    inputs = _business_dict_to_inputs(business)
+    if inputs is None:
+        return {
+            "score": 0,
+            "breakdown": {
+                "source_evidence": 0, "triangulation": 0,
+                "verification": 0, "owner_context": 0, "synergy": 0,
+            },
+            "tier": "F",
+        }
 
-    rating_pts = _rating_points(business.get("rating"))
-    reviews_pts = _review_count_points(business.get("review_count"))
-    website_pts = _website_points(business.get("website"))
-    dm_pts = _decision_maker_points(business)
-
-    total = email_pts + rating_pts + reviews_pts + website_pts + dm_pts
-
+    scored = score_email_candidate(inputs)
     return {
-        "score": int(total),
-        "breakdown": {
-            "email_confidence": int(email_pts),    # /40
-            "rating": int(rating_pts),              # /20
-            "reviews": int(reviews_pts),            # /15
-            "website": int(website_pts),            # /10
-            "decision_maker": int(dm_pts),          # /15
-        },
-        "tier": _tier_from_score(int(total)),
+        "score": scored.score,
+        "breakdown": scored.components,
+        "tier": scored.grade,
+        "specificity": scored.specificity.value,
+        "is_catchall": scored.is_catchall,
+        "is_triangulated": scored.is_triangulated,
+        "requires_manual_review": scored.requires_manual_review,
     }
 
 
-def _tier_from_score(score: int) -> str:
-    """Qualitative tier for filtering / UI."""
-    if score >= 80:
-        return "A"
-    if score >= 65:
-        return "B"
-    if score >= 50:
-        return "C"
-    if score >= 35:
-        return "D"
-    return "F"
-
-
-def rank_businesses(businesses: list, top_n: int = None) -> list:
-    """
-    Return businesses sorted by lead_quality_score DESC.
-    Mutates each business to add 'lead_quality_score' and 'lead_tier'.
-    """
+def rank_businesses(businesses: list, top_n: Optional[int] = None) -> list:
     for b in businesses:
         s = compute_lead_quality_score(b)
         b["lead_quality_score"] = s["score"]
