@@ -790,6 +790,73 @@ def _agent_website_scrape(
     return candidates, list(emails)
 
 
+def _agent_colleague_emails(
+    owners: list[OwnerCandidate], domain: str, cache: _Cache,
+    max_colleagues: int = 3,
+) -> list[str]:
+    """
+    Per-colleague email harvesting for NPI-less industries (legal, trades,
+    consumer services). The primary owner-search sometimes misses employee
+    emails because it AND's the query with owner/founder keywords, so
+    pages that publish `jperez@firm.com` on a /team page without those
+    keywords never match.
+
+    This agent takes the top N validated colleague names and does a
+    targeted Google query per colleague:  "Colleague Name" "@firm.com"
+
+    Gated by the caller — fires ONLY when the first-pass triangulation
+    didn't form a pattern. Costs up to N × $0.005 SearchApi credits on
+    the firms that need it; zero cost on firms that already have a
+    confident pattern. Results cached per (colleague, domain) for 30 days.
+
+    Returns a list of @domain emails found across the queries.
+    """
+    if not domain or not owners:
+        return []
+    api_key = os.getenv("SEARCHAPI_KEY")
+    if not api_key:
+        return []
+
+    email_pat = re.compile(r"[A-Za-z0-9._%+-]+@" + re.escape(domain), re.I)
+    found: set[str] = set()
+
+    # Pick top N colleagues by confidence. 3 is a good balance between
+    # triangulation signal (need 2+ matches to confirm a pattern) and
+    # cost (3 queries ≈ $0.015/business).
+    top = sorted(owners, key=lambda x: -x.confidence)[:max_colleagues]
+
+    for owner in top:
+        if not owner.full_name or " " not in owner.full_name.strip():
+            continue
+        query = f'"{owner.full_name}" "@{domain}"'
+        cache_key = (owner.full_name.lower(), domain.lower())
+        cached = cache.get("colleague_emails", *cache_key)
+        if cached is not None:
+            found.update(cached)
+            continue
+
+        try:
+            resp = requests.get(
+                "https://www.searchapi.io/api/v1/search",
+                params={"q": query, "engine": "google", "num": 5, "api_key": api_key},
+                timeout=15,
+            )
+            data = resp.json()
+        except Exception as e:
+            logger.warning(f"colleague_emails({owner.full_name}): {e}")
+            continue
+
+        per_query: set[str] = set()
+        for r in data.get("organic_results", []):
+            blob = (r.get("title") or "") + " " + (r.get("snippet") or "")
+            per_query.update(m.lower() for m in email_pat.findall(blob))
+
+        cache.set("colleague_emails", list(per_query), *cache_key)
+        found.update(per_query)
+
+    return list(found)
+
+
 def _agent_whois(domain: str, cache: _Cache) -> list[OwnerCandidate]:
     if not domain:
         return []
@@ -1357,6 +1424,43 @@ def triangulate_email(
     result.detected_pattern = _triangulate_pattern(
         list(all_emails), ranked, domain, cache
     )
+
+    # ── PHASE 3B: Colleague-email harvest (gated) ──
+    # If the first-pass triangulation didn't form a confident pattern AND
+    # we have 2+ validated colleagues AND the domain is known, do one
+    # targeted Google search per top colleague to find emails we might
+    # have missed (common for legal/trades where NPI is unavailable and
+    # the primary owner-search query can't catch employee emails on
+    # /team pages). Costs up to 3 × $0.005 SearchApi credits; fires
+    # only on the businesses that need it; results cached per-colleague.
+    if (
+        (result.detected_pattern is None or result.detected_pattern.confidence < 70)
+        and len(ranked) >= 2
+        and domain
+    ):
+        result.agents_run.append("colleague_emails")
+        try:
+            harvested = _agent_colleague_emails(ranked, domain, cache)
+            if harvested:
+                result.agents_succeeded.append("colleague_emails")
+                new_emails = [e for e in harvested if e not in all_emails]
+                all_emails.update(harvested)
+                if new_emails:
+                    # Re-triangulate with the enriched email pool
+                    refined = _triangulate_pattern(
+                        list(all_emails), ranked, domain, cache
+                    )
+                    # Only overwrite if refined is a stronger signal
+                    if refined and (
+                        result.detected_pattern is None
+                        or refined.confidence > result.detected_pattern.confidence
+                    ):
+                        result.detected_pattern = refined
+                    result.evidence_trail["colleague_emails_added"] = new_emails
+        except Exception as e:
+            logger.warning(f"colleague_emails agent failed: {e}")
+
+    result.evidence_trail["discovered_emails"] = list(all_emails)
 
     # ── PHASE 4: Candidate generation ──
     candidates = _generate_candidates(
