@@ -11,7 +11,6 @@ Adapts to the existing src.storage backend (Postgres via Neon or SQLite).
 """
 import re
 import sys
-from typing import List, Optional, Tuple
 
 from src.storage import USE_PG, _PARAM, _connect, _cursor, _row_to_dict
 

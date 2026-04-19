@@ -25,11 +25,8 @@ Public API:
 
 Called from the Bulk Scrape + Export CSV pages as a download button.
 """
-from __future__ import annotations
-
 import json
 from datetime import datetime
-from typing import Optional
 
 
 def build_business_decision_log(business: dict) -> dict:
