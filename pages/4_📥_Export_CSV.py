@@ -266,6 +266,15 @@ if filtered:
             "✗" if "whois_mismatch" in source else ""
         )
         npi_ver = "✓" if "npi_registry" in source or "_pattern_confirmed" in source or "_npi_anchored" in source else ""
+        # Carry the triangulation evidence trail into the CSV so the audit
+        # tool preserves it instead of discarding $5/business of work.
+        prof_ids = b.get("professional_ids") or ""
+        if not isinstance(prof_ids, str):
+            try:
+                import json as _json
+                prof_ids = _json.dumps(prof_ids)
+            except Exception:
+                prof_ids = ""
         export_rows.append({
             "Badge": _verify_badge(b),
             "Score": b.get("lead_quality_score", ""),
@@ -289,6 +298,9 @@ if filtered:
             "Review Count": b.get("review_count", ""),
             "Place ID": b.get("place_id", ""),
             "Email Status": b.get("email_status", ""),
+            # Evidence trail — the audit tool reads this JSON to skip
+            # rework and preserve triangulation context for email gen.
+            "Professional IDs": prof_ids,
         })
 
     df = pd.DataFrame(export_rows)
