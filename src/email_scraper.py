@@ -1196,12 +1196,26 @@ def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
     dm_title = ""
     dm_npi = None
     if result.decision_maker:
-        dm_name = result.decision_maker.full_name
-        dm_title = getattr(result.decision_maker, "title", "") or ""
-        src_url = getattr(result.decision_maker, "source_url", "") or ""
-        m = _re.search(r"/provider-view/(\d{10})", src_url)
-        if m:
-            dm_npi = m.group(1)
+        candidate_name = result.decision_maker.full_name or ""
+        # Last-line safety net: the universal_pipeline is supposed to
+        # have filtered junk names, but if anything slipped through
+        # (exception, old cache path, future regression), refuse to
+        # write a junk name as the business's contact. The business
+        # still gets saved — it just won't claim a fake owner.
+        try:
+            from src.universal_pipeline import _is_junk_name as _junk
+            if _junk(candidate_name, business_name=business.get("business_name", "")):
+                candidate_name = ""
+                dm_title = ""
+        except Exception:
+            pass
+        if candidate_name:
+            dm_name = candidate_name
+            dm_title = getattr(result.decision_maker, "title", "") or ""
+            src_url = getattr(result.decision_maker, "source_url", "") or ""
+            m = _re.search(r"/provider-view/(\d{10})", src_url)
+            if m:
+                dm_npi = m.group(1)
 
     def _npi_from_owner(o):
         su = getattr(o, "source_url", "") or ""

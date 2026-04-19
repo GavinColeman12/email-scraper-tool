@@ -664,7 +664,19 @@ def _agent_combined_owner_and_press(
             c for c in raw
             if not _is_junk_name(c.full_name, business_name=business_name)
         ]
-        return (candidates, cached.get("emails", []), cached.get("linkedin_urls", []))
+        # Seamless-retry guard: if the cached list was non-empty but
+        # ALL of it is now garbage under current rules, the cache is
+        # stale under a newer validation regime. Fall through to a
+        # fresh SearchApi call rather than returning an empty list.
+        if raw and not candidates:
+            logger.info(
+                f"cache miss-through: all {len(raw)} cached owner "
+                f"candidates for {business_name!r} failed validation; "
+                f"re-querying"
+            )
+        else:
+            return (candidates, cached.get("emails", []),
+                    cached.get("linkedin_urls", []))
 
     api_key = os.getenv("SEARCHAPI_KEY")
     if not api_key:
@@ -741,8 +753,11 @@ def _agent_linkedin_gated(
     cached = cache.get("owner_candidates", "linkedin", business_name)
     if cached is not None:
         raw = [OwnerCandidate(**c) for c in cached]
-        return [c for c in raw
+        filt = [c for c in raw
                 if not _is_junk_name(c.full_name, business_name=business_name)]
+        # Fall through to fresh query if everything cached is now garbage
+        if not (raw and not filt):
+            return filt
 
     api_key = os.getenv("SEARCHAPI_KEY")
     if not api_key:
@@ -794,7 +809,12 @@ def _agent_website_scrape(
             c for c in raw
             if not _is_junk_name(c.full_name, business_name=business_name)
         ]
-        return candidates, cached.get("emails", [])
+        # If ALL cached names are junk, don't just return emails with an
+        # empty candidate list — re-scrape the website and get fresh
+        # candidates. Website scrape is FREE (no API credit), so the
+        # cost of the retry is just bandwidth.
+        if not (raw and not candidates):
+            return candidates, cached.get("emails", [])
 
     paths = [
         "/", "/about", "/about-us", "/team", "/our-team", "/meet-the-team",
@@ -1015,8 +1035,11 @@ def _agent_npi_healthcare(
     cached = cache.get("owner_candidates", "npi", business_name, address)
     if cached is not None:
         raw = [OwnerCandidate(**c) for c in cached]
-        return [c for c in raw
+        filt = [c for c in raw
                 if not _is_junk_name(c.full_name, business_name=business_name)]
+        # Fall through on all-garbage; NPI is free (US gov API)
+        if not (raw and not filt):
+            return filt
 
     city, state = _extract_city_state(address)
     if not state:
@@ -1076,6 +1099,16 @@ def _agent_npi_healthcare(
 def _synthesise_owners(
     candidates: list[OwnerCandidate], business_name: str
 ) -> list[OwnerCandidate]:
+    if not candidates:
+        return []
+    # Safety net: even if earlier extract/cache paths somehow allowed a
+    # junk name through, this is the last gate before a name becomes a
+    # decision maker. Any post-fix run should see the garbage cleared
+    # here as a defense-in-depth check.
+    candidates = [
+        c for c in candidates
+        if not _is_junk_name(c.full_name, business_name=business_name)
+    ]
     if not candidates:
         return []
     groups: dict[str, list[OwnerCandidate]] = {}
