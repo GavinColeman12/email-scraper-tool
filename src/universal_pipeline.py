@@ -395,12 +395,63 @@ GENERIC_LOCALS = {
 }
 
 STOPWORD_NAMES = {
-    "dental", "clinic", "family", "smile", "smiles", "center", "care",
-    "group", "associates", "practice", "office", "dentistry", "about",
-    "contact", "team", "home", "services", "patients", "privacy",
-    "terms", "copyright", "reserved", "welcome", "main", "street",
+    # Medical / dental
+    "dental", "dentistry", "medical", "clinic", "care", "wellness",
+    "smile", "smiles", "family", "pediatric", "orthodontic", "oral",
+    # Legal (was MISSING — caused "Injury Attorneys", "Spodek Law",
+    # "Manhattan Legal", "Law Tsigler" to pass validation)
+    "law", "legal", "attorney", "attorneys", "lawyer", "lawyers",
+    "injury", "criminal", "divorce", "immigration", "estate",
+    "counsel", "advocate", "advocates", "firm", "esq", "esquire",
+    # Construction / trades
     "construction", "builders", "contracting", "plumbing", "electric",
-    "hvac", "services", "company", "corporation", "llc", "inc",
+    "electrical", "hvac", "roofing", "landscaping",
+    # Generic business / UI text
+    "center", "centre", "group", "associates", "practice", "office",
+    "services", "service", "solutions", "company", "corporation",
+    "llc", "inc", "pllc", "pc", "ltd", "corp",
+    # Website / navigation / generic content
+    "about", "contact", "team", "home", "staff", "patients", "clients",
+    "privacy", "terms", "copyright", "reserved", "welcome", "menu",
+    "search", "send", "email", "visit", "find", "call", "now",
+    "online", "website", "forbes", "business", "phone", "number",
+    "announces", "interim", "updated", "chief", "executive", "principal",
+    "president", "vice", "director", "managing", "owner", "founder",
+    "partner", "ceo", "cfo", "coo", "cto", "cmo",
+    # Geographic (US states + major cities frequently scraped as "names")
+    "york", "brooklyn", "queens", "bronx", "manhattan", "staten",
+    "boston", "chicago", "seattle", "portland", "denver", "austin",
+    "dallas", "houston", "phoenix", "atlanta", "miami", "tampa",
+    "united", "states", "usa", "america", "american",
+    "alabama", "alaska", "arizona", "arkansas", "california",
+    "colorado", "connecticut", "delaware", "florida", "georgia",
+    "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas",
+    "kentucky", "louisiana", "maine", "maryland", "massachusetts",
+    "michigan", "minnesota", "mississippi", "missouri", "montana",
+    "nebraska", "nevada", "hampshire", "jersey", "mexico",
+    "carolina", "dakota", "ohio", "oklahoma", "oregon",
+    "pennsylvania", "rhode", "tennessee", "texas", "utah",
+    "vermont", "virginia", "washington", "wisconsin", "wyoming",
+    # Streets / generic location words
+    "street", "avenue", "boulevard", "road", "suite", "floor",
+    # UI/SEO spam
+    "experienced", "special", "review", "reviews", "meet", "like",
+    "comment", "share", "search", "profile", "profiles", "listing",
+    "listings",
+}
+
+# Common English words that are sometimes used as surnames but NEVER as
+# first names. If the first OR last name token IS one of these alone,
+# reject — it's almost certainly extracted UI text, not a person.
+NEVER_A_PERSON = {
+    "law", "legal", "email", "menu", "search", "send", "visit", "call",
+    "find", "now", "home", "about", "contact", "team", "staff",
+    "meet", "review", "reviews", "center", "office", "services",
+    "announces", "interim", "executive", "chief", "vice", "partner",
+    "managing", "owner", "founder", "president", "director", "principal",
+    "attorney", "attorneys", "lawyer", "lawyers", "esq", "esquire",
+    "law", "legal", "firm", "group", "company", "united", "states",
+    "forbes", "business", "phone", "number",
 }
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; UniversalPipeline/1.0)"}
@@ -430,14 +481,51 @@ def _extract_city_state(addr: str) -> tuple[str, str]:
     return "", _extract_state(addr)
 
 
-def _is_junk_name(name: str) -> bool:
+def _is_junk_name(name: str, business_name: str = "") -> bool:
+    """
+    Reject anything that's clearly NOT a person's name.
+
+    Rules (fail-fast — any one rejects):
+      1. Fewer than 2 tokens OR any token shorter than 2 chars.
+      2. ANY token appears in STOPWORD_NAMES (industry terms, cities,
+         UI text, generic business words). A real person's name
+         shouldn't have "Attorneys", "Law", "Manhattan" in it.
+      3. First OR last name alone is in NEVER_A_PERSON (words that
+         are commonly scraped as names but never actually ARE names:
+         "Law", "Menu", "Search", role titles, etc.).
+      4. All tokens appear somewhere in the business name (then this
+         is a business-name fragment, not a person — e.g., "Spodek
+         Law" at "Spodek Law Group" or "Injury Attorneys" at "NYC
+         Injury Attorneys P.C.").
+
+    business_name is optional for backward compat but should be
+    passed whenever available.
+    """
     tokens = name.lower().split()
     if len(tokens) < 2:
         return True
-    if any(t in STOPWORD_NAMES for t in tokens):
-        return True
     if any(len(t) < 2 for t in tokens):
         return True
+    if any(t in STOPWORD_NAMES for t in tokens):
+        return True
+    # NEVER_A_PERSON check — first OR last alone disqualifies
+    if tokens[0] in NEVER_A_PERSON or tokens[-1] in NEVER_A_PERSON:
+        return True
+    # Business-name-fragment check. Fires ONLY when every token is in
+    # the business name AND at least one of those tokens is also a
+    # stopword. This catches "Spodek Law" / "Injury Attorneys" /
+    # "Manhattan Legal" (stopword + surname/adjective from the biz name)
+    # while still ACCEPTING owner-operators whose real name happens
+    # to match the business name: "Daniel Clement" at "Clement Law",
+    # "Todd Spodek" at "Spodek Law Group", "Robert Tsigler" at
+    # "Law Offices of Robert Tsigler". Owner-match is the STRONGEST
+    # signal they actually are the owner — don't reject it.
+    if business_name:
+        biz_tokens = set(re.findall(r"[a-z]+", business_name.lower()))
+        if (biz_tokens
+            and all(t in biz_tokens for t in tokens)
+            and any(t in STOPWORD_NAMES for t in tokens)):
+            return True
     return False
 
 
@@ -467,7 +555,8 @@ def _extract_title(text: str) -> str:
     return best[0].title() if best[0] else ""
 
 
-def _parse_name(raw: str, source: str, title: str = "") -> Optional[OwnerCandidate]:
+def _parse_name(raw: str, source: str, title: str = "",
+                business_name: str = "") -> Optional[OwnerCandidate]:
     if not raw:
         return None
     clean = re.sub(r",?\s*(DDS|DMD|MD|DO|PhD|Esq|PA|LLC|Inc\.?)\.?\s*$", "", raw.strip(), flags=re.I)
@@ -477,7 +566,7 @@ def _parse_name(raw: str, source: str, title: str = "") -> Optional[OwnerCandida
     if len(parts) < 2:
         return None
     first, last = parts[0], parts[-1]
-    if _is_junk_name(f"{first} {last}"):
+    if _is_junk_name(f"{first} {last}", business_name=business_name):
         return None
     return OwnerCandidate(
         full_name=f"{first} {last}",
@@ -486,13 +575,15 @@ def _parse_name(raw: str, source: str, title: str = "") -> Optional[OwnerCandida
     )
 
 
-def _extract_names_with_titles(text: str, window: int = 80) -> list[OwnerCandidate]:
+def _extract_names_with_titles(
+    text: str, window: int = 80, business_name: str = ""
+) -> list[OwnerCandidate]:
     out: list[OwnerCandidate] = []
     if not text:
         return out
     for m in NAME_RE.finditer(text):
         name = m.group(1).strip()
-        if _is_junk_name(name):
+        if _is_junk_name(name, business_name=business_name):
             continue
         start = max(0, m.start() - window)
         end = min(len(text), m.end() + window)
@@ -500,7 +591,8 @@ def _extract_names_with_titles(text: str, window: int = 80) -> list[OwnerCandida
         title = _extract_title(context)
         if not title:
             continue
-        parsed = _parse_name(name, source="", title=title)
+        parsed = _parse_name(name, source="", title=title,
+                             business_name=business_name)
         if parsed:
             parsed.raw_snippet = context[:200]
             out.append(parsed)
@@ -565,14 +657,15 @@ def _agent_combined_owner_and_press(
             name_part = r.get("title", "").split(" - ")[0].split(" | ")[0].strip()
             name_part = re.sub(r"\s*\(.*?\)\s*$", "", name_part)
             parsed = _parse_name(name_part, source="google_owner_search",
-                                 title=_extract_title(blob))
+                                 title=_extract_title(blob),
+                                 business_name=business_name)
             if parsed:
                 parsed.source_url = url
                 parsed.raw_snippet = blob[:200]
                 candidates.append(parsed)
             continue
 
-        for cand in _extract_names_with_titles(blob):
+        for cand in _extract_names_with_titles(blob, business_name=business_name):
             cand.source = "google_owner_search"
             cand.source_url = url
             cand.raw_snippet = blob[:200]
@@ -628,7 +721,8 @@ def _agent_linkedin_gated(
         name_part = title.split(" - ")[0].split(" | ")[0].strip()
         name_part = re.sub(r"\s*\(.*?\)\s*$", "", name_part)
         parsed = _parse_name(name_part, source="linkedin_via_google",
-                             title=_extract_title(title + " " + snippet))
+                             title=_extract_title(title + " " + snippet),
+                             business_name=business_name)
         if parsed:
             parsed.source_url = url
             parsed.raw_snippet = (title + " :: " + snippet)[:200]
@@ -680,7 +774,7 @@ def _agent_website_scrape(
         emails.update(email_pat.findall(r.text))
 
         text = _strip_html(r.text)
-        for cand in _extract_names_with_titles(text):
+        for cand in _extract_names_with_titles(text, business_name=business_name):
             cand.source = "website_scrape"
             cand.source_url = url
             candidates.append(cand)
@@ -789,7 +883,7 @@ def _agent_places(
 
     candidates: list[OwnerCandidate] = []
     for t in texts:
-        for cand in _extract_names_with_titles(t):
+        for cand in _extract_names_with_titles(t, business_name=business_name):
             cand.source = "google_places"
             cand.confidence = 55
             candidates.append(cand)
@@ -882,9 +976,14 @@ def _synthesise_owners(
         score = _title_weight(primary.title) * 3
         score += (len(sources) - 1) * 15
 
+        # Business-name surname match is the STRONGEST signal for
+        # owner-operators. "Daniel Clement" at "Clement Law", "Todd
+        # Spodek" at "Spodek Law Group". Bumped from +40 → +65 so
+        # this beats generic LinkedIn "Founder" hits for random
+        # employees who happen to be in Google's snippet results.
         last_norm = re.sub(r"[^a-z]", "", primary.last_name.lower())
         if last_norm and len(last_norm) >= 3 and last_norm in biz_clean:
-            score += 40
+            score += 65
 
         if sources == ["whois"]:
             score = min(score, 25)
