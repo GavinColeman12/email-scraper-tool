@@ -99,7 +99,17 @@ def _business_dict_to_inputs(business: dict) -> Optional[ScoringInputs]:
     # has a triangulated pattern for SOMEONE ELSE'S email doesn't inherit
     # that proof. So: only credit triangulation if this specific email's
     # local-part is consistent with the detected pattern for this owner.
-    prof = business.get("professional_ids") or {}
+    # professional_ids is stored in SQLite as a JSON string; decode it if
+    # we got the raw column value instead of a freshly-built dict.
+    prof_raw = business.get("professional_ids")
+    if isinstance(prof_raw, str):
+        try:
+            import json as _json
+            prof = _json.loads(prof_raw) or {}
+        except Exception:
+            prof = {}
+    else:
+        prof = prof_raw or {}
     detected = (prof or {}).get("detected_pattern") or {}
     local = email.split("@", 1)[0].lower() if "@" in email else ""
     email_matches_pattern = False
