@@ -348,13 +348,36 @@ if top_picks:
     import io
     buf = io.StringIO()
     df.to_csv(buf, index=False)
-    st.download_button(
-        f"📥 Download top {len(top_picks)} as CSV",
-        data=buf.getvalue(),
-        file_name=f"top_{len(top_picks)}_leads_search_{search_id}.csv",
-        mime="text/csv",
-        type="primary",
-    )
+    c_csv, c_log = st.columns(2)
+    with c_csv:
+        st.download_button(
+            f"📥 Download top {len(top_picks)} as CSV",
+            data=buf.getvalue(),
+            file_name=f"top_{len(top_picks)}_leads_search_{search_id}.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+        )
+    with c_log:
+        # Decision log — per-business: score breakdown, gate decision, all
+        # candidates, triangulation evidence. Grep a bad lead, see why.
+        import json as _json
+        from src.decision_log import build_search_decision_log
+        try:
+            log = build_search_decision_log(search_id)
+            st.download_button(
+                "🧠 Download decision log (.json)",
+                data=_json.dumps(log, indent=2, default=str),
+                file_name=f"decision_log_search_{search_id}.json",
+                mime="application/json",
+                use_container_width=True,
+                help="Full decision tree per business: scoring breakdown, "
+                     "gate decision, all candidate emails, triangulation "
+                     "evidence, agents run. Debug bad results by grepping "
+                     "the JSON.",
+            )
+        except Exception as e:
+            st.caption(f"⚠️ Decision log unavailable: {e}")
 else:
     st.info("No businesses match the current filters. Lower the thresholds above.")
 
