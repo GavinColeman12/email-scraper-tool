@@ -964,25 +964,27 @@ def _generate_candidates(
     domain: str,
     detected_pattern: Optional[DetectedPattern],
     industry: str,
+    allow_first_only_pattern: bool = False,
 ) -> list[dict]:
     first, last = decision_maker.first_name, decision_maker.last_name
     candidates: list[dict] = []
     seen: set[str] = set()
 
-    if detected_pattern and detected_pattern.confidence >= 70:
+    # Guardrail: the bare `first@domain` pattern is off by default. It's
+    # only valid for solo practitioners and a few consumer-facing verticals
+    # where it's conventional. Everywhere else it guesses at a shared
+    # mailbox. Opt-in only (allow_first_only_pattern=True).
+    def _block_first_only(pat: str) -> bool:
+        return pat == "first" and not allow_first_only_pattern
+
+    if detected_pattern and detected_pattern.confidence >= 70 \
+            and not _block_first_only(detected_pattern.pattern_name):
         email = build_email(detected_pattern.pattern_name, first, last, domain)
         if email and email not in seen:
             candidates.append({"email": email, "pattern": detected_pattern.pattern_name,
                                "source": "detected_pattern",
                                "base_confidence": detected_pattern.confidence})
             seen.add(email)
-
-    fl = build_email("first.last", first, last, domain)
-    if fl and fl not in seen:
-        candidates.append({"email": fl, "pattern": "first.last",
-                           "source": "first_last_fallback",
-                           "base_confidence": 45})
-        seen.add(fl)
 
     try:
         priors = get_patterns_for(industry) or []
@@ -994,7 +996,7 @@ def _generate_candidates(
     # slice but frequently correspond to the real mailbox (e.g.
     # drjones@mikejonesdds.com was NB-valid in our tests).
     for pattern_name, weight in priors:
-        if pattern_name == "first":
+        if _block_first_only(pattern_name):
             continue
         email = build_email(pattern_name, first, last, domain)
         if email and email not in seen:
@@ -1004,6 +1006,17 @@ def _generate_candidates(
             seen.add(email)
             if len(candidates) >= 4:
                 break
+
+    # first.last@ is the universal last-resort default. Appended AFTER
+    # evidence-backed and industry-prior candidates so NB verification
+    # burns on stronger signals first, but it's always present so we
+    # never ship a business with zero candidates.
+    fl = build_email("first.last", first, last, domain)
+    if fl and fl not in seen:
+        candidates.append({"email": fl, "pattern": "first.last",
+                           "source": "first_last_fallback",
+                           "base_confidence": 45})
+        seen.add(fl)
 
     return candidates[:4]
 
@@ -1076,6 +1089,7 @@ def triangulate_email(
     scraped_emails: Optional[list[str]] = None,
     use_neverbounce: bool = True,
     confidence_threshold: int = 70,
+    allow_first_only_pattern: bool = False,
 ) -> TriangulationResult:
     start = time.time()
     result = TriangulationResult()
@@ -1220,7 +1234,8 @@ def triangulate_email(
 
     # ── PHASE 4: Candidate generation ──
     candidates = _generate_candidates(
-        result.decision_maker, domain, result.detected_pattern, industry
+        result.decision_maker, domain, result.detected_pattern, industry,
+        allow_first_only_pattern=allow_first_only_pattern,
     )
 
     if not candidates:
