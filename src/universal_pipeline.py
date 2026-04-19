@@ -403,9 +403,14 @@ STOPWORD_NAMES = {
     "law", "legal", "attorney", "attorneys", "lawyer", "lawyers",
     "injury", "criminal", "divorce", "immigration", "estate",
     "counsel", "advocate", "advocates", "firm", "esq", "esquire",
-    # Construction / trades
-    "construction", "builders", "contracting", "plumbing", "electric",
-    "electrical", "hvac", "roofing", "landscaping",
+    # Construction / trades / real estate (missing — caused "Best
+    # Contractor", "Bedroom Apartments", "Homes Our")
+    "construction", "builders", "builder", "contracting", "contractor",
+    "contractors", "plumbing", "electric", "electrical", "hvac",
+    "roofing", "landscaping", "renovation", "renovations",
+    "apartments", "apartment", "bedroom", "bathroom", "kitchen",
+    "homes", "housing", "property", "properties", "real", "realty",
+    "development", "developer", "developments", "frontier",
     # Generic business / UI text
     "center", "centre", "group", "associates", "practice", "office",
     "services", "service", "solutions", "company", "corporation",
@@ -418,6 +423,38 @@ STOPWORD_NAMES = {
     "announces", "interim", "updated", "chief", "executive", "principal",
     "president", "vice", "director", "managing", "owner", "founder",
     "partner", "ceo", "cfo", "coo", "cto", "cmo",
+    # Articles / pronouns / common English words (caused "The Rushmore",
+    # "Homes Our", "Are History", "Our Work", "Our Process")
+    "the", "our", "your", "my", "his", "her", "their", "this", "that",
+    "these", "those", "a", "an", "are", "is", "was", "were", "has",
+    "have", "had", "be", "been", "being", "you", "we", "they",
+    # Question / conjunction words (caused "When Laurence" — partial
+    # sentence fragment like "When Laurence Brooks founded...")
+    "when", "where", "who", "what", "why", "how", "which",
+    # Adjectives / superlatives common in business names and SEO copy
+    "best", "top", "new", "old", "great", "good", "premium", "premier",
+    "luxury", "highly", "engaged", "leading", "trusted", "expert",
+    "experienced", "featured", "visionary", "combined", "trade",
+    "highly", "more", "most", "very", "much",
+    # Places / neighborhoods often mistaken for surnames
+    "village", "villa", "district", "borough", "neighborhood",
+    "downtown", "uptown", "midtown", "hills", "heights", "park",
+    "grove", "lake", "long", "short", "view", "viewed",
+    # Months + days (caused "Updated March", "April Showers", etc.)
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday", "today", "tomorrow", "yesterday",
+    # Misc UI/navigation words observed in real scraper output
+    "customer", "customers", "employee", "employees", "directory",
+    "leader", "leadership", "recognition", "aviation", "civil",
+    "government", "healthcare", "sectors", "market", "markets",
+    "partnering", "opportunities", "trade", "year", "history",
+    "ethics", "safety", "repairs", "insurance", "claims", "process",
+    "method", "methods", "values", "core", "original", "related",
+    "companies", "corp", "work", "works", "project", "projects",
+    "news", "mesh", "hudson", "yards", "instagram", "facebook",
+    "twitter", "linkedin", "yelp", "email", "phone",
     # Geographic (US states + major cities frequently scraped as "names")
     "york", "brooklyn", "queens", "bronx", "manhattan", "staten",
     "boston", "chicago", "seattle", "portland", "denver", "austin",
@@ -618,7 +655,15 @@ def _agent_combined_owner_and_press(
     """
     cached = cache.get("owner_candidates", "combined", business_name, domain)
     if cached is not None:
-        candidates = [OwnerCandidate(**c) for c in cached.get("candidates", [])]
+        # Lazily re-validate cached candidates against the CURRENT
+        # _is_junk_name rules. Old cache entries from before the
+        # stopword expansion are filtered out here without requiring
+        # a manual cache bust.
+        raw = [OwnerCandidate(**c) for c in cached.get("candidates", [])]
+        candidates = [
+            c for c in raw
+            if not _is_junk_name(c.full_name, business_name=business_name)
+        ]
         return (candidates, cached.get("emails", []), cached.get("linkedin_urls", []))
 
     api_key = os.getenv("SEARCHAPI_KEY")
@@ -695,7 +740,9 @@ def _agent_linkedin_gated(
 
     cached = cache.get("owner_candidates", "linkedin", business_name)
     if cached is not None:
-        return [OwnerCandidate(**c) for c in cached]
+        raw = [OwnerCandidate(**c) for c in cached]
+        return [c for c in raw
+                if not _is_junk_name(c.full_name, business_name=business_name)]
 
     api_key = os.getenv("SEARCHAPI_KEY")
     if not api_key:
@@ -742,7 +789,11 @@ def _agent_website_scrape(
 
     cached = cache.get("domain_emails", "scrape", domain)
     if cached is not None:
-        candidates = [OwnerCandidate(**c) for c in cached.get("candidates", [])]
+        raw = [OwnerCandidate(**c) for c in cached.get("candidates", [])]
+        candidates = [
+            c for c in raw
+            if not _is_junk_name(c.full_name, business_name=business_name)
+        ]
         return candidates, cached.get("emails", [])
 
     paths = [
@@ -963,7 +1014,9 @@ def _agent_npi_healthcare(
     """Healthcare-only NPI fallback, with the v3 field-mapping bug FIXED."""
     cached = cache.get("owner_candidates", "npi", business_name, address)
     if cached is not None:
-        return [OwnerCandidate(**c) for c in cached]
+        raw = [OwnerCandidate(**c) for c in cached]
+        return [c for c in raw
+                if not _is_junk_name(c.full_name, business_name=business_name)]
 
     city, state = _extract_city_state(address)
     if not state:
