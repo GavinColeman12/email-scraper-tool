@@ -917,10 +917,33 @@ def _agent_website_scrape(
         if not (raw and not candidates):
             return candidates, cached_emails
 
+    # Fixed paths — expanded to cover the full range of how small businesses
+    # label their people pages across legal, medical, dental, trades, B2B
+    # services, real estate, and accounting/consulting.
     paths = [
-        "/", "/about", "/about-us", "/team", "/our-team", "/meet-the-team",
-        "/staff", "/leadership", "/providers", "/doctors", "/attorneys",
-        "/contact", "/contact-us", "/our-story", "/who-we-are",
+        # General / contact
+        "/", "/about", "/about-us", "/about_us", "/our-story", "/who-we-are",
+        "/contact", "/contact-us", "/contact_us",
+        # Team pages — generic
+        "/team", "/our-team", "/our_team", "/meet-the-team", "/meet-our-team",
+        "/staff", "/our-staff", "/people", "/our-people", "/faculty",
+        "/bios", "/meet-us",
+        # Leadership
+        "/leadership", "/our-leadership", "/principals", "/our-principals",
+        "/management", "/executives",
+        # Legal
+        "/attorneys", "/our-attorneys", "/lawyers", "/our-lawyers",
+        "/partners", "/our-partners", "/associates", "/our-associates",
+        "/attorney-bios", "/attorneys-staff",
+        # Medical + dental
+        "/providers", "/our-providers", "/doctors", "/our-doctors",
+        "/dentists", "/our-dentists", "/physicians", "/our-physicians",
+        "/specialists", "/our-specialists", "/meet-the-doctor",
+        "/meet-the-dentist", "/meet-the-doctors", "/our-practice",
+        # Real estate
+        "/agents", "/our-agents", "/brokers", "/realtors", "/team-agents",
+        # Consulting / accounting
+        "/consultants", "/advisors", "/our-advisors", "/cpas", "/our-cpas",
     ]
     base = website.rstrip("/")
     candidates: list[OwnerCandidate] = []
@@ -928,8 +951,49 @@ def _agent_website_scrape(
 
     email_pat = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
+    # Keywords that, when found in a link's visible text OR href, indicate
+    # that link goes to a team/people/staff page. Used to DISCOVER custom
+    # URLs the fixed path list would miss (e.g. /company/our-team,
+    # /firm/lawyers, /practice/dentists).
+    TEAM_LINK_KEYWORDS = (
+        "team", "attorneys", "attorney-", "lawyers", "lawyer-",
+        "doctors", "doctor-", "physicians", "physician-",
+        "dentists", "dentist-", "providers", "provider-",
+        "specialists", "specialist-", "staff", "people", "principals",
+        "partners", "associates", "agents", "brokers", "realtors",
+        "consultants", "advisors", "leadership", "faculty", "our-team",
+        "meet-the-", "meet-our-", "about-us", "about_us", "bios", "bio-",
+    )
+
+    try:
+        from src.email_scraper import _is_rejected
+    except Exception:
+        def _is_rejected(_e): return False
+
+    def _process_page(url: str, html: str) -> None:
+        """Extract emails + name candidates from a fetched page."""
+        try:
+            hidden = extract_all_hidden_emails(html) or {}
+            for src_emails in hidden.values():
+                emails.update(e for e in src_emails if not _is_rejected(e))
+        except Exception:
+            pass
+        emails.update(e for e in email_pat.findall(html) if not _is_rejected(e))
+
+        text = _strip_html(html)
+        for cand in _extract_names_with_titles(text, business_name=business_name):
+            cand.source = "website_scrape"
+            cand.source_url = url
+            candidates.append(cand)
+
+    visited: set[str] = set()
+    discovered_paths: set[str] = set()
+
     for path in paths:
         url = base + path
+        if url in visited:
+            continue
+        visited.add(url)
         try:
             r = requests.get(url, timeout=8, headers=HEADERS, allow_redirects=True)
             if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
@@ -937,24 +1001,52 @@ def _agent_website_scrape(
         except Exception:
             continue
 
-        try:
-            from src.email_scraper import _is_rejected
-        except Exception:
-            def _is_rejected(_e): return False
+        _process_page(url, r.text)
 
-        try:
-            hidden = extract_all_hidden_emails(r.text) or {}
-            for src_emails in hidden.values():
-                emails.update(e for e in src_emails if not _is_rejected(e))
-        except Exception:
-            pass
-        emails.update(e for e in email_pat.findall(r.text) if not _is_rejected(e))
+        # Link discovery: on the homepage + /about, scan anchor tags for
+        # team/people links we haven't tried yet. Caps at 10 discovered
+        # URLs per site to prevent runaway crawls.
+        if path in ("/", "/about", "/about-us") and len(discovered_paths) < 10:
+            try:
+                anchors = re.findall(
+                    r'<a[^>]+href=["\']([^"\'#]+)["\'][^>]*>([^<]{0,120})</a>',
+                    r.text, flags=re.I,
+                )
+                for href, link_text in anchors:
+                    href_l = href.lower().strip()
+                    text_l = link_text.lower().strip()
+                    # Match against keywords in either the URL or link text
+                    if not any(k in href_l or k in text_l for k in TEAM_LINK_KEYWORDS):
+                        continue
+                    # Resolve to absolute URL on the same domain
+                    if href_l.startswith("http"):
+                        if domain and domain.lower() not in href_l:
+                            continue  # off-site link
+                        candidate_url = href
+                    elif href_l.startswith("/"):
+                        candidate_url = base + href
+                    else:
+                        continue  # skip fragments / mailto / javascript:
+                    if candidate_url in visited:
+                        continue
+                    discovered_paths.add(candidate_url)
+                    if len(discovered_paths) >= 10:
+                        break
+            except Exception:
+                pass
 
-        text = _strip_html(r.text)
-        for cand in _extract_names_with_titles(text, business_name=business_name):
-            cand.source = "website_scrape"
-            cand.source_url = url
-            candidates.append(cand)
+    # Follow the discovered team-page links
+    for url in list(discovered_paths)[:10]:
+        if url in visited:
+            continue
+        visited.add(url)
+        try:
+            r = requests.get(url, timeout=8, headers=HEADERS, allow_redirects=True)
+            if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
+                continue
+        except Exception:
+            continue
+        _process_page(url, r.text)
 
     if domain:
         emails = {e.lower() for e in emails if e.lower().endswith("@" + domain.lower())}

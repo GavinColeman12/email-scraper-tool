@@ -43,6 +43,33 @@ def _call(params: dict) -> dict:
     return data
 
 
+# Businesses sometimes list a social-media page as their "website" on
+# Google Maps. We can't scrape those for owner emails (they're walled
+# gardens, not the business's own domain). Track them so the triangulation
+# pipeline can skip the website-scrape agent cleanly instead of pulling
+# irrelevant candidates off a social page.
+_SOCIAL_ONLY_HOSTS = (
+    "facebook.com", "fb.com", "instagram.com", "linkedin.com",
+    "twitter.com", "x.com", "tiktok.com", "youtube.com",
+    "yelp.com", "tripadvisor.com", "opentable.com", "doordash.com",
+    "ubereats.com", "grubhub.com", "seamless.com", "pinterest.com",
+    "wa.me", "wame.me",  # WhatsApp share links
+)
+
+
+def _is_real_business_website(url: str) -> bool:
+    """Return False for social/review-only URLs that can't be scraped."""
+    if not url:
+        return False
+    u = url.lower().strip()
+    if not (u.startswith("http://") or u.startswith("https://")):
+        u = "https://" + u  # tolerate bare domains
+    for host in _SOCIAL_ONLY_HOSTS:
+        if f"://{host}/" in u or f"://www.{host}/" in u or u.endswith(f"://{host}") or u.endswith(f"://www.{host}"):
+            return False
+    return True
+
+
 def _parse_business(biz: dict) -> dict:
     """Normalize a SearchApi local_result into our format."""
     btype = biz.get("type") or biz.get("types") or ""
@@ -54,11 +81,18 @@ def _parse_business(biz: dict) -> dict:
     if not maps_url and place_id:
         maps_url = f"https://www.google.com/maps/place/?q=place_id:{place_id}"
 
+    raw_website = biz.get("website", "") or ""
+    # Keep the raw value visible so operators can inspect, but flag
+    # social-only URLs so the triangulation pipeline can bail out cleanly.
+    website = raw_website if _is_real_business_website(raw_website) else ""
+
     return {
         "business_name": biz.get("title", "") or biz.get("name", ""),
         "address": biz.get("address", ""),
         "phone": biz.get("phone", ""),
-        "website": biz.get("website", ""),
+        "website": website,
+        "website_raw": raw_website,
+        "website_is_social_only": bool(raw_website and not website),
         "rating": float(biz.get("rating") or 0),
         "review_count": int(biz.get("reviews") or biz.get("reviews_count") or 0),
         "place_id": place_id,
