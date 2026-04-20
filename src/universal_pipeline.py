@@ -455,6 +455,34 @@ STOPWORD_NAMES = {
     "companies", "corp", "work", "works", "project", "projects",
     "news", "mesh", "hudson", "yards", "instagram", "facebook",
     "twitter", "linkedin", "yelp", "email", "phone",
+    # Search #28 additions — more verbs/adjectives that got through
+    "get", "see", "named", "cool", "kids", "already", "started",
+    "working", "too", "late", "continue", "reading", "read", "less",
+    "request", "certified", "free", "consultation", "consultations",
+    "social", "media", "blog", "blogs", "post", "posts",
+    # Legal/PI industry terms frequently caught as "names"
+    "client", "clients", "testimonials", "testimonial", "testimony",
+    "car", "cars", "vehicle", "vehicles", "accident", "accidents",
+    "bicycle", "motorcycle", "truck", "trucks", "pedestrian",
+    "premises", "liability", "liabilities",
+    # Marketing copy phrases
+    "straightforward", "personalized", "advocacy", "results",
+    "continue", "working", "already", "too", "late", "combined",
+    "experience", "trusted", "dedicated", "personal", "attention",
+    # Geographic + demographic
+    "county", "state", "bar", "city", "town", "mayor", "council",
+    "member", "members", "citizen", "citizens", "resident", "residents",
+    "texans", "served", "veterans", "navy", "army", "police", "turned",
+    "association", "homeowners", "free",
+    # Honorific/rank qualifiers
+    "high", "net", "worth", "worthy", "honorable", "honored",
+    "adjunct", "professor", "assistant",
+    # Directional + highway/city terms (caught "North Mopac", "San Marcos")
+    "north", "south", "east", "west", "northeast", "northwest",
+    "southeast", "southwest", "mopac", "interstate", "highway",
+    "expressway", "expy", "parkway", "turnpike", "freeway",
+    "san", "marcos", "antonio", "francisco", "diego", "jose",
+    "santa", "fort", "lake", "port", "saint", "mount",
     # Geographic (US states + major cities frequently scraped as "names")
     "york", "brooklyn", "queens", "bronx", "manhattan", "staten",
     "boston", "chicago", "seattle", "portland", "denver", "austin",
@@ -598,11 +626,20 @@ def _parse_name(raw: str, source: str, title: str = "",
         return None
     clean = re.sub(r",?\s*(DDS|DMD|MD|DO|PhD|Esq|PA|LLC|Inc\.?)\.?\s*$", "", raw.strip(), flags=re.I)
     clean = re.sub(r"^(Dr\.?|Mr\.?|Mrs\.?|Ms\.?|Miss)\s+", "", clean, flags=re.I)
+    # Strip trailing ellipsis / truncation markers from malformed
+    # snippets (e.g., "Stephen ..." from "Stephen ... Founder").
+    clean = re.sub(r"\s*\.{2,}\s*$", "", clean)
     parts = [p for p in clean.split() if p]
     parts = [p for p in parts if not re.match(r"^[A-Z]\.?$", p)]
     if len(parts) < 2:
         return None
     first, last = parts[0], parts[-1]
+    # Both first and last name must be purely alphabetic (allowing
+    # hyphenated last names). Rejects "..." and other punctuation junk.
+    if not re.match(r"^[A-Za-z][A-Za-z'\-]*$", first):
+        return None
+    if not re.match(r"^[A-Za-z][A-Za-z'\-]*$", last):
+        return None
     if _is_junk_name(f"{first} {last}", business_name=business_name):
         return None
     return OwnerCandidate(
