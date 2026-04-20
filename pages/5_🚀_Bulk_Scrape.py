@@ -76,15 +76,16 @@ mode_col1, mode_col2 = st.columns([3, 2])
 with mode_col1:
     mode = st.radio(
         "Mode",
-        ["basic", "verified", "deep", "triangulation"],
+        ["basic", "verified", "deep", "triangulation", "volume"],
         format_func=lambda k: {
             "basic": "⚡ Basic — rules + SMTP verification (~5 sec/biz, free, <5% bounce)",
             "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200, <2% bounce)",
             "deep": "🧠 Deep — 4 agents + Sonnet + SMTP + Haiku (~10 sec/biz, ~$2/200, <2% bounce)",
-            "triangulation": "🎯 Triangulation (recommended) — 5 parallel agents + NPI + NeverBounce gate (~45s/biz, ~$5-6/100)",
+            "triangulation": "🎯 Triangulation — 5 parallel agents + NPI + NeverBounce gate (~45s/biz, ~$5-6/100)",
+            "volume": "🚀 Volume (recommended for mass outreach) — deep crawl + Wayback + selective NB (~30s/biz, <$4/200, never picks info@)",
         }[k],
         horizontal=False,
-        index=3,  # default to Triangulation
+        index=4,  # default to Volume (cheap mass mode)
     )
 with mode_col2:
     parallelism = st.slider(
@@ -105,6 +106,16 @@ elif mode == "triangulation":
         f"💰 Triangulation mode estimated cost: ~${cost:.2f} for {len(pending)} businesses "
         "(~$0.05-0.06/biz: 2 SearchApi calls + 1 NeverBounce verify per business). "
         "Only the top candidate is NeverBounced — SMTP probes are free."
+    )
+elif mode == "volume":
+    cost = len(pending) * 0.016  # avg ~$0.016/biz after early-exits
+    st.caption(
+        f"💰 Volume mode estimated cost: ~${cost:.2f} for {len(pending)} businesses "
+        "(~$0.01-0.025/biz: deep crawl + Wayback are free; LinkedIn fires only when no DM found; "
+        "NeverBounce verifies the top 1-3 scraped/pattern-matched candidates). "
+        "**Generic inboxes — info@, contact@, hello@, smile@, etc. — are never picked.** "
+        "Decision makers first; industry prior (law → firstname.lastname, dental → first.last) "
+        "is the last resort."
     )
 
 # ── Start button ──
@@ -132,7 +143,16 @@ def _scrape_worker(biz, job_id):
         business_type = biz.get("business_type", "") or ""
         phone = biz.get("phone", "") or ""
 
-        if mode == "triangulation":
+        if mode == "volume":
+            # Volume Mode: deep crawl + Wayback + selective NB, no
+            # combined owner/press SearchApi call, no Haiku, no NPI.
+            # ~10× cheaper than triangulation at ~40-60% DM-email hit
+            # rate. Never picks generic inboxes.
+            from src.volume_mode import scrape_volume
+            from src.volume_mode.pipeline import volume_result_to_scrape_result
+            vres = scrape_volume(biz, use_neverbounce=True)
+            result = volume_result_to_scrape_result(vres, biz)
+        elif mode == "triangulation":
             # v3 parallel-agent pipeline: NPI + website + Google + press
             # + SMTP + NeverBounce gate. Lazy-imported so any issue in the
             # pipeline module surfaces at run-time, not page-load time.
@@ -198,7 +218,15 @@ if start_clicked and pending:
         "verified": "bulk_verified_scrape",
         "basic": "bulk_scrape",
         "triangulation": "bulk_triangulation_scrape",
+        "volume": "bulk_volume_scrape",
     }[mode]
+
+    # Volume mode tracks a shared cost cap across the run — reset the
+    # counter at the start of every new job so yesterday's spend doesn't
+    # gate today's run.
+    if mode == "volume":
+        from src.volume_mode.pipeline import reset_run_budget
+        reset_run_budget(25.0)
     job_id = background_jobs.start(
         job_type=job_type,
         items=pending,
