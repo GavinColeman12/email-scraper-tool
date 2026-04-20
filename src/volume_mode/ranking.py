@@ -55,22 +55,51 @@ class Candidate:
 
 BUCKET_ORDER = ("a", "b", "c", "d", "e")
 
+# Buckets that point at the identified decision maker. When NB verifies
+# these, we prefer them over a random scraped-personal (bucket c) — the
+# goal is to reach the DM, not any person at the company.
+DM_BUCKETS = ("a", "b", "d")
+
 
 def pick_best(candidates: list[Candidate]) -> Optional[Candidate]:
     """
-    Walk buckets a→e. Inside each bucket pick the best by NB rank.
-    Skip any candidate whose local part is generic.
-    Return None if no bucket had an acceptable candidate (caller
-    should mark the row volume_empty).
+    Pick the best candidate with a two-tier priority:
+
+    Tier 1 — NB-VALID candidates only:
+        among DM-match buckets (a, b, d) → a > b > d
+        else among scraped-other buckets (c, e) → c > e
+
+    Tier 2 — nothing NB-valid, fall back to the original bucket walk:
+        a → b → c → d → e
+        Within bucket, NB-unknown > NB-catchall > NB-invalid > not-tested
+
+    Generic-inbox emails are NEVER eligible.
+    Bucket d/e candidates that came back NB-invalid are skipped (we have
+    proof they bounce — don't send).
     """
+    # Pre-filter: drop generics
+    eligible = [c for c in candidates
+                if not is_generic(c.email.split("@", 1)[0])]
+    if not eligible:
+        return None
+
+    # Tier 1: any NB-valid? Prefer DM-match buckets, then bucket order.
+    nb_valid = [c for c in eligible if c.nb_result == "valid"]
+    if nb_valid:
+        def _nb_valid_rank(c: Candidate) -> tuple:
+            is_dm = 0 if c.bucket in DM_BUCKETS else 1
+            return (is_dm, BUCKET_ORDER.index(c.bucket), c.email)
+        nb_valid.sort(key=_nb_valid_rank)
+        return nb_valid[0]
+
+    # Tier 2: walk buckets a→e. Inside each bucket pick the best by NB rank.
     for bucket in BUCKET_ORDER:
-        pool = [c for c in candidates
-                if c.bucket == bucket and not is_generic(c.email.split("@", 1)[0])]
+        pool = [c for c in eligible if c.bucket == bucket]
         if not pool:
             continue
         pool.sort(key=lambda c: (c.nb_rank(), c.email))
         top = pool[0]
-        # Within bucket (d) or (e), skip if NB actively invalid (we know it bounces)
+        # Bucket d/e NB-invalid = confirmed bounce, don't pick
         if bucket in ("d", "e") and top.nb_result == "invalid":
             continue
         return top
@@ -78,9 +107,21 @@ def pick_best(candidates: list[Candidate]) -> Optional[Candidate]:
 
 
 def confidence_tier(winner: Optional[Candidate]) -> str:
+    """
+    Map the winning candidate to a tier the shared Badge logic understands.
+
+    volume_verified: any bucket (including d — industry-prior guess)
+                     where NeverBounce returned VALID. When bucket D's
+                     pattern-built email is NB-valid, we've PROVEN the
+                     pattern — that's not a guess anymore.
+    volume_scraped:  bucket a/b/c with NB-catchall/unknown/untested
+    volume_guess:    bucket d/e NOT NB-verified (budget exhausted or
+                     candidate never fit the NB walk)
+    volume_empty:    nothing plausible
+    """
     if winner is None:
         return TIER_EMPTY
-    if winner.bucket in ("a", "b", "c") and winner.nb_result == "valid":
+    if winner.nb_result == "valid":
         return TIER_VERIFIED
     if winner.bucket in ("a", "b", "c"):
         return TIER_SCRAPED

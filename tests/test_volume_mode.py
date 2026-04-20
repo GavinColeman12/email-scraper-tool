@@ -128,13 +128,43 @@ def test_build_email_unicode_names():
 
 # ── ranking ──
 
-def test_pick_best_prefers_bucket_a_over_b():
+def test_pick_best_nb_valid_dm_match_beats_nb_valid_other():
+    """
+    New rule (post L9-followup): NB-valid candidates win regardless of
+    bucket. Among NB-valid, DM-match buckets (a, b, d) beat non-DM
+    buckets (c, e). Inside the DM-match tier, bucket order still applies.
+    """
     cands = [
-        Candidate(email="jane@acme.com", bucket="b", nb_result="valid"),
-        Candidate(email="jsmith@acme.com", bucket="a", nb_result="unknown"),
+        Candidate(email="scraped-random@acme.com", bucket="c", nb_result="valid"),
+        Candidate(email="dm-from-pattern@acme.com", bucket="d", nb_result="valid"),
     ]
     winner = pick_best(cands)
-    assert winner.email == "jsmith@acme.com"  # bucket a wins even vs b-NB-valid
+    # Bucket D (DM's industry-prior guess, NB-verified) wins over bucket
+    # C (random scraped person, NB-verified) — we want the DM.
+    assert winner.email == "dm-from-pattern@acme.com"
+
+
+def test_pick_best_bucket_a_wins_when_both_nb_valid():
+    """Within DM-match tier, bucket A (scraped DM) still beats bucket B (triangulated) beats D (prior)."""
+    cands = [
+        Candidate(email="dm-scraped@acme.com", bucket="a", nb_result="valid"),
+        Candidate(email="dm-triangulated@acme.com", bucket="b", nb_result="valid"),
+        Candidate(email="dm-prior@acme.com", bucket="d", nb_result="valid"),
+    ]
+    winner = pick_best(cands)
+    assert winner.email == "dm-scraped@acme.com"
+
+
+def test_pick_best_falls_through_to_original_walk_when_no_nb_valid():
+    """When nothing is NB-valid, walk a→e in the original priority."""
+    cands = [
+        Candidate(email="scraped@acme.com", bucket="a", nb_result=None),
+        Candidate(email="dm-guess@acme.com", bucket="d", nb_result="catchall"),
+    ]
+    winner = pick_best(cands)
+    # Bucket A (untested) wins over bucket D (catchall) because we fall
+    # through to the original walk when no NB-valid exists.
+    assert winner.email == "scraped@acme.com"
 
 
 def test_pick_best_skips_generic_even_if_top():

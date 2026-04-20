@@ -293,25 +293,37 @@ def scrape_volume(
                 source="scraped from website (personal mailbox)",
             ))
 
-    # Bucket B: DM email built from triangulated pattern (≥2 evidence)
-    if (dm and pattern
-            and getattr(pattern, "confidence", 0) >= 70
-            and len(getattr(pattern, "evidence_emails", []) or []) >= 2):
+    # Bucket B: DM email built from a TRIANGULATED pattern.
+    # `{first}@` is still banned as an INDUSTRY-PRIOR guess (bucket D)
+    # because bare-first is too ambiguous to try blind. But here in
+    # bucket B, we have proof: the pattern was inferred from a real
+    # email on this domain matching a real person at this business
+    # (e.g. clark@ley.law → pattern first → george@ley.law for a
+    # different partner). 1+ evidence email is enough when method is
+    # triangulation.
+    pattern_is_proven = (
+        pattern and getattr(pattern, "method", "") == "triangulation"
+        and bool(getattr(pattern, "evidence_emails", []) or [])
+    )
+    if dm and pattern and getattr(pattern, "confidence", 0) >= 70 and pattern_is_proven:
         # The existing triangulation pattern_name format differs from
         # volume_mode's {first}.{last} templating. Use universal_pipeline's
-        # build_email for consistency with detected patterns.
+        # build_email for consistency with detected patterns (it handles
+        # "first", "flast", "drlast", etc.).
         from src.industry_patterns import build_email as _up_build_email
         tri_email = _up_build_email(pattern.pattern_name, dm_first, dm_last, domain)
         if tri_email and not is_generic(tri_email.split("@", 1)[0]):
-            candidates.append(Candidate(
-                email=tri_email, bucket="b",
-                pattern=pattern.pattern_name,
-                source=(
-                    f"triangulated pattern '{pattern.pattern_name}' "
-                    f"(evidence: {len(pattern.evidence_emails)} email"
-                    f"{'s' if len(pattern.evidence_emails) != 1 else ''})"
-                ),
-            ))
+            # Don't add if already in a higher-bucket slot
+            if not any(c.email == tri_email for c in candidates):
+                candidates.append(Candidate(
+                    email=tri_email, bucket="b",
+                    pattern=pattern.pattern_name,
+                    source=(
+                        f"triangulated pattern '{pattern.pattern_name}' "
+                        f"(evidence: {len(pattern.evidence_emails)} email"
+                        f"{'s' if len(pattern.evidence_emails) != 1 else ''})"
+                    ),
+                ))
 
     # Bucket D: DM email from industry prior (LAST RESORT, primary only)
     # Guard: don't build a bucket-D email when the "DM" is actually the
@@ -387,18 +399,44 @@ def scrape_volume(
                     source="fallback first.last@ (no DM found)",
                 ))
 
-    # ── Phase 7: Selective NeverBounce on buckets a/b/c ──
+    # ── Phase 7: NeverBounce verification ──
+    # Walks candidates in priority order, NB'ing each until we find a
+    # VALID one or exhaust the per-biz budget. The walk now includes
+    # bucket D (DM industry-prior guess) — previously we skipped NB on
+    # guesses, which meant a random scraped-person in bucket C beat an
+    # actual DM whose pattern-built email would have NB-valid'd. Always
+    # NB the DM's guess so we can promote it to volume_verified when it
+    # works, or reject it when it bounces.
+    #
+    # Budget: up to 4 NB calls per biz ($0.012 worst case, well under the
+    # $0.025/biz ceiling). Cached NB results cost $0 so most re-runs hit
+    # 0 fresh calls.
     if use_neverbounce:
         result.agents_run.append("neverbounce")
-        nb_budget_remaining = min(
-            3,
-            int(max(0.0, (budget_per_biz_usd - biz_cost) // COST_NB_CALL)),
-        )
-        # Always verify buckets a/b/c in confidence order
-        to_verify = [c for c in candidates if c.bucket in ("a", "b", "c")]
-        for cand in to_verify[:nb_budget_remaining]:
+        NB_BUDGET = 4
+        # Priority for NB verification: DM-matching buckets first (a, b, d),
+        # then scraped-other (c), then universal fallback (e). This is
+        # DIFFERENT from the ranking walk — here we just want to ensure
+        # the DM's candidate gets verified before we exhaust the budget
+        # on random scraped emails.
+        def _verify_priority(cand: Candidate) -> tuple:
+            dm_match = 0 if cand.bucket in ("a", "b", "d") else 1
+            bucket_idx = "abcde".index(cand.bucket)
+            return (dm_match, bucket_idx)
+
+        to_verify = sorted(candidates, key=_verify_priority)
+        nb_used = 0
+        found_valid = False
+        for cand in to_verify:
+            if nb_used >= NB_BUDGET:
+                break
             if _run_budget_remaining() < COST_NB_CALL:
                 break
+            if biz_cost + COST_NB_CALL > budget_per_biz_usd:
+                break
+            # Skip if already NB'd (shouldn't happen, defence-in-depth)
+            if cand.nb_result is not None:
+                continue
             try:
                 nb = _nb_verify_cached(cand.email, cache)
                 cand.nb_result = nb.get("result")
@@ -406,9 +444,13 @@ def scrape_volume(
                 cand.nb_result = None
             _charge(COST_NB_CALL)
             biz_cost += COST_NB_CALL
+            nb_used += 1
             if cand.nb_result == "valid":
-                break  # found one that sticks — stop burning calls
-        if any(c.nb_result for c in to_verify):
+                found_valid = True
+                # Found a deliverable address — stop burning budget on
+                # lower-priority candidates.
+                break
+        if any(c.nb_result for c in candidates):
             result.agents_succeeded.append("neverbounce")
 
     # ── Phase 8: Pick best_email via ranking walker ──
