@@ -14,6 +14,9 @@ from src.deep_scraper import deep_scrape_business_emails
 # triangulation module has any import-time issue on a given runtime.
 from src.lead_scoring import compute_lead_quality_score, rank_businesses
 from src.secrets import get_secret
+from src.export_rows import (
+    build_rows, BULK_DISPLAY_COLUMNS, EXPORT_COLUMNS,
+)
 
 st.set_page_config(page_title="Bulk Scrape", page_icon="🚀", layout="wide")
 st.title("🚀 Bulk Scrape + Pick Top N")
@@ -336,41 +339,63 @@ top_picks = filtered[:top_n]
 
 # ── Display ──
 if top_picks:
-    rows = []
-    for b in top_picks:
-        rows.append({
-            "Score": b.get("lead_quality_score", 0),
-            "Tier": b.get("lead_tier", "-"),
-            "Business": b["business_name"],
-            "Rating": b.get("rating"),
-            "Reviews": b.get("review_count"),
-            "Email": b.get("primary_email", ""),
-            "Confidence": b.get("confidence", ""),
-            "Contact": b.get("contact_name") or "—",
-            "Title": b.get("contact_title") or "—",
-            "Source": b.get("email_source", ""),
-            "Website": b.get("website") or "—",
-        })
-    df = pd.DataFrame(rows)
+    # Build the FULL export schema once (one source of truth with the
+    # Export CSV page). The table view below hides most columns; the CSV
+    # download includes every field so the audit tool + stakeholder
+    # consumers get the same data regardless of which page exported.
+    show_evidence = st.toggle(
+        "Show verification evidence columns (SMTP / WHOIS / NPI / Pattern)",
+        value=False,
+        help="Tick columns derived from the triangulation evidence trail. "
+             "Hidden by default; always included in the CSV download.",
+    )
+    full_rows = build_rows(top_picks, include_evidence=show_evidence)
+    df_full = pd.DataFrame(full_rows)
+
+    # On-screen: narrow, glanceable subset. Appends any evidence tick
+    # columns when the operator opted in.
+    display_cols = list(BULK_DISPLAY_COLUMNS)
+    if show_evidence:
+        for col in ("SMTP ✓", "WHOIS ✓", "NPI/Pattern ✓"):
+            if col in df_full.columns and col not in display_cols:
+                display_cols.insert(3, col)
+    df_display = df_full[[c for c in display_cols if c in df_full.columns]]
     st.dataframe(
-        df, use_container_width=True, hide_index=True,
+        df_display, use_container_width=True, hide_index=True,
         column_config={
             "Score": st.column_config.ProgressColumn(
                 "Score", min_value=0, max_value=100, format="%d"
             ),
             "Website": st.column_config.LinkColumn("Website"),
+            "Email Source": st.column_config.TextColumn(
+                "Email Source",
+                help="How the email was found — e.g. triangulated pattern, "
+                     "scraped from website, industry prior, fallback.",
+                width="large",
+            ),
         },
     )
 
     # ── Export selected ──
+    # CSV uses the FULL schema — not the curated display subset — so
+    # downstream consumers (audit tool, stakeholders) get every field
+    # we know about the lead, same as the Export CSV page.
     st.divider()
     import io
+    # Always include evidence columns in CSV regardless of the UI toggle
+    csv_rows = build_rows(top_picks, include_evidence=True)
+    df_csv = pd.DataFrame(csv_rows)
+    # Enforce canonical column order for audit-tool compatibility
+    ordered = [c for c in EXPORT_COLUMNS if c in df_csv.columns]
+    remaining = [c for c in df_csv.columns if c not in ordered]
+    df_csv = df_csv[ordered + remaining]
     buf = io.StringIO()
-    df.to_csv(buf, index=False)
+    df_csv.to_csv(buf, index=False)
     c_csv, c_log = st.columns(2)
     with c_csv:
         st.download_button(
-            f"📥 Download top {len(top_picks)} as CSV",
+            f"📥 Download top {len(top_picks)} as CSV "
+            f"({len(df_csv.columns)} columns)",
             data=buf.getvalue(),
             file_name=f"top_{len(top_picks)}_leads_search_{search_id}.csv",
             mime="text/csv",

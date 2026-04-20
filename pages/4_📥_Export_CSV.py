@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from src import storage
+from src.export_rows import build_rows, EXPORT_COLUMNS, verify_badge, split_contact_name
 
 st.set_page_config(page_title="Export CSV", page_icon="📥", layout="wide")
 st.title("📥 Export to CSV")
@@ -31,63 +32,8 @@ from src.email_verifier import (
 )
 
 
-# Title prefixes to strip when parsing names (case-insensitive)
-_TITLE_PREFIXES = {
-    "dr", "dr.", "doctor", "mr", "mr.", "mrs", "mrs.", "ms", "ms.",
-    "miss", "prof", "prof.", "professor", "attorney", "atty", "atty.",
-    "sir", "madam", "rev", "rev.", "reverend", "hon", "hon.",
-    "honorable", "capt", "capt.", "captain", "lt", "lt.",
-}
-
-# Credential suffixes to strip (case-insensitive, applied after comma split)
-_CREDENTIAL_SUFFIXES = {
-    "dmd", "dds", "md", "do", "phd", "dpm", "od", "dc", "dvm", "edd",
-    "mba", "jd", "esq", "esquire", "cpa", "rn", "np", "pa", "pa-c",
-    "bsn", "msn", "aprn", "fnp", "mph", "mha", "ms", "ma", "ba", "bs",
-    "facp", "faap", "facog", "facs",
-}
-
-
-def split_contact_name(full_name: str) -> tuple:
-    """
-    Parse a contact name into (first, last) by stripping prefix titles
-    (Dr., Attorney, etc.) and suffix credentials (DMD, Esq., PhD, etc.).
-
-    Examples:
-      'Dr. Caleb Martin, DMD'  → ('Caleb', 'Martin')
-      'Linda Miller'           → ('Linda', 'Miller')
-      'Sarah Chen, MD, MPH'    → ('Sarah', 'Chen')
-      'J. Robert Smith'        → ('J.', 'Smith')   # middle initial lost OK
-      ''                       → ('', '')
-    """
-    if not full_name:
-        return ("", "")
-
-    # Strip credentials after comma: "Dr. Caleb Martin, DMD" → "Dr. Caleb Martin"
-    name = full_name.split(",")[0].strip()
-
-    # Tokenize
-    tokens = name.split()
-    if not tokens:
-        return ("", "")
-
-    # Strip prefix titles (possibly multiple, e.g. "Dr. Rev. Smith")
-    while tokens and tokens[0].lower().rstrip(".") in _TITLE_PREFIXES:
-        tokens.pop(0)
-
-    # Strip suffix credentials that weren't comma-separated ("Smith DMD")
-    while tokens and tokens[-1].lower().rstrip(".") in _CREDENTIAL_SUFFIXES:
-        tokens.pop()
-
-    if not tokens:
-        return ("", "")
-    if len(tokens) == 1:
-        return (tokens[0], "")
-
-    # First = first token, Last = last token (middle names ignored for email purposes)
-    first = tokens[0]
-    last = tokens[-1]
-    return (first, last)
+# split_contact_name + verify_badge now live in src/export_rows.py so this
+# page and the Bulk Scrape page share the same schema. Imported above.
 
 labels = {s["id"]: f"#{s['id']} — {s['query']}" for s in searches}
 search_id = st.selectbox("Search", options=list(labels.keys()),
@@ -242,104 +188,14 @@ if filtered:
              "Hidden by default to keep the preview readable.",
     )
 
-    # Verification badge: combines confidence + SMTP + email_source for quick UI
-    # Demotes 🟢 HIGH to 🟡 MEDIUM when the row is actually unsafe — i.e.
-    # catch-all domain (deliverable-looking but no mailbox guarantee) or
-    # triangulation marked email_safe_to_send=false. Keeps the badge
-    # honest so the operator doesn't ship unverified sends.
-    def _verify_badge(biz):
-        conf = biz.get("confidence", "") or ""
-        src = biz.get("email_source", "") or ""
-        reason = (biz.get("email_verification_reason") or "").lower()
-        safe_flag = biz.get("email_safe_to_send")
-        is_unsafe = (safe_flag == 0 or safe_flag is False) or "catch-all" in reason
-        if conf == "high" and "smtp_verified" in src:
-            return "🟢 VERIFIED" if not is_unsafe else "🟡 MED (catch-all)"
-        if conf == "high":
-            return "🟢 HIGH" if not is_unsafe else "🟡 MED (catch-all)"
-        if conf == "medium" and "unverified_with_signal" in src:
-            return "🟡 MED (unverified)"
-        if conf == "medium":
-            return "🟡 MEDIUM"
-        if conf == "skip":
-            return "⛔ SKIP"
-        if conf == "low":
-            return "🔴 LOW"
-        return "❔ ?"
-
-    export_rows = []
-    for b in filtered:
-        email = b.get("primary_email", "")
-        contact_name = b.get("contact_name", "")
-        first_name, last_name = split_contact_name(contact_name)
-        source = (b.get("email_source") or "").lower()
-        # Derive the verification evidence from source suffixes + fields.
-        # Triangulation rows set source="triangulation" and store agent
-        # successes in professional_ids JSON, so we consult both paths.
-        prof_obj = b.get("professional_ids") or {}
-        if isinstance(prof_obj, str):
-            try:
-                import json as _json
-                prof_obj = _json.loads(prof_obj)
-            except Exception:
-                prof_obj = {}
-        agents_ok = set((prof_obj.get("agents_succeeded") or []) if isinstance(prof_obj, dict) else [])
-        pattern_confirmed = bool(prof_obj.get("detected_pattern")) if isinstance(prof_obj, dict) else False
-
-        smtp_ver = "✓" if ("smtp_verified" in source or "smtp_probe" in agents_ok
-                           or "neverbounce" in agents_ok) else ""
-        whois_ver = "✓" if ("whois_confirmed" in source or "whois" in agents_ok) else (
-            "✗" if "whois_mismatch" in source else ""
-        )
-        npi_ver = "✓" if (
-            "npi_registry" in source
-            or "_pattern_confirmed" in source
-            or "_npi_anchored" in source
-            or "npi_healthcare" in agents_ok
-            or pattern_confirmed
-        ) else ""
-        # Carry the triangulation evidence trail into the CSV so the audit
-        # tool preserves it instead of discarding $5/business of work.
-        prof_ids = b.get("professional_ids") or ""
-        if not isinstance(prof_ids, str):
-            try:
-                import json as _json
-                prof_ids = _json.dumps(prof_ids)
-            except Exception:
-                prof_ids = ""
-        row = {
-            "Badge": _verify_badge(b),
-            "Score": b.get("lead_quality_score", ""),
-            "Tier": b.get("lead_tier", ""),
-        }
-        if show_evidence:
-            row["SMTP ✓"] = smtp_ver
-            row["WHOIS ✓"] = whois_ver
-            row["NPI/Pattern ✓"] = npi_ver
-        row.update({
-            "Business Name": b.get("business_name", ""),
-            "Business Type": b.get("business_type", ""),
-            "Location": b.get("address", ""),
-            "Phone": b.get("phone", ""),
-            "Website": b.get("website", ""),
-            "Email": email,
-            "First Name": first_name,
-            "Last Name": last_name,
-            "Contact Name": contact_name,
-            "Contact Title": b.get("contact_title", ""),
-            "Email Source": b.get("email_source", ""),
-            "Confidence": b.get("confidence", ""),
-            "Rating": b.get("rating", ""),
-            "Review Count": b.get("review_count", ""),
-            "Place ID": b.get("place_id", ""),
-            "Email Status": b.get("email_status", ""),
-            # Evidence trail — the audit tool reads this JSON to skip
-            # rework and preserve triangulation context for email gen.
-            "Professional IDs": prof_ids,
-        })
-        export_rows.append(row)
-
-    df = pd.DataFrame(export_rows)
+    # Delegated to src.export_rows so this page and the Bulk Scrape page
+    # produce identical CSVs. Badge logic, name parsing, and evidence-
+    # trail derivation all live in one module; see src/export_rows.py.
+    df = pd.DataFrame(build_rows(filtered, include_evidence=show_evidence))
+    # Enforce canonical column order for audit-tool compatibility
+    _ordered = [c for c in EXPORT_COLUMNS if c in df.columns]
+    _extra = [c for c in df.columns if c not in _ordered]
+    df = df[_ordered + _extra]
     # Sort by lead quality score DESC
     if "Score" in df.columns and df["Score"].dtype != object:
         df = df.sort_values("Score", ascending=False, na_position="last")
