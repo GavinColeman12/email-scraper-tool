@@ -1167,6 +1167,98 @@ def scrape_business_emails(business_name: str, website: str,
 # Triangulation entry point (v3 pipeline)
 # ============================================================
 
+def _describe_email_source(result) -> str:
+    """
+    Render a specific, human-readable description of how the winning email
+    was chosen. Replaces the uninformative "triangulation" label in the
+    CSV/DB so operators can tell at a glance whether the email is:
+        - a triangulated pattern applied to the decision maker (strongest)
+        - a scraped personal mailbox from the website
+        - a scraped shared inbox (info@, contact@)
+        - an industry-prior guess (weakest)
+        - the generic first.last@ fallback
+    Always suffixed with the NeverBounce verdict when available.
+    """
+    best = (result.best_email or "").lower()
+    if not best:
+        return "no_candidate_produced"
+
+    # Find the candidate dict that matches best_email (pipeline sorts by
+    # confidence desc, best_email is candidates[0] in the happy path).
+    winner = None
+    for c in (result.candidate_emails or []):
+        if (c.get("email") or "").lower() == best:
+            winner = c
+            break
+    if winner is None:
+        winner = (result.candidate_emails or [{}])[0]
+
+    local = best.split("@", 1)[0] if "@" in best else ""
+    # Heuristic: does the local part look like a shared inbox vs a person?
+    SHARED = {
+        "info", "contact", "contactus", "hello", "hi", "team", "support",
+        "admin", "office", "mail", "enquiries", "inquiries", "sales",
+        "marketing", "help", "service", "reception", "frontdesk",
+        "appointments", "bookings", "smile", "welcome", "intake",
+    }
+    is_shared = local in SHARED or any(local.startswith(p) for p in ("no-reply", "noreply"))
+
+    # Does the local part reference the DM's name? (Simple substring check.)
+    dm_local_match = False
+    dm = getattr(result, "decision_maker", None)
+    if dm:
+        first = (dm.first_name or "").lower()
+        last = (dm.last_name or "").lower()
+        if (first and first in local) or (last and last in local):
+            dm_local_match = True
+
+    source = winner.get("source") or ""
+    pattern = winner.get("pattern") or ""
+
+    # Top-level path:
+    if source == "detected_pattern":
+        pat = getattr(result.detected_pattern, "pattern_name", pattern)
+        method = getattr(result.detected_pattern, "method", "") or ""
+        ev_n = len(getattr(result.detected_pattern, "evidence_emails", []) or [])
+        if method == "triangulation" and ev_n >= 1:
+            label = f"triangulated pattern '{pat}' (evidence: {ev_n} email{'s' if ev_n != 1 else ''})"
+        else:
+            label = f"detected pattern '{pat}'"
+    elif source == "scraped_direct":
+        if is_shared:
+            label = "scraped from website (shared inbox)"
+        elif dm_local_match:
+            label = "scraped from website (decision maker mailbox)"
+        else:
+            label = "scraped from website (personal mailbox)"
+    elif source == "industry_prior":
+        label = f"industry prior '{pattern}' applied to decision maker"
+    elif source == "first_last_fallback":
+        label = "fallback first.last@ (no stronger signal)"
+    else:
+        label = source or "unknown_path"
+
+    # NB verdict suffix
+    nb = winner.get("nb_result")
+    nb_label = ""
+    if nb == "valid":
+        nb_label = " — NeverBounce VALID"
+    elif nb == "catchall":
+        nb_label = " — NeverBounce CATCH-ALL (unverified)"
+    elif nb == "invalid":
+        nb_label = " — NeverBounce INVALID"
+    elif nb == "unknown":
+        nb_label = " — NeverBounce UNKNOWN"
+    elif nb is None and winner.get("smtp_valid"):
+        nb_label = " — SMTP accepted"
+
+    # Flag if the top email is below the safe-to-send threshold
+    if not getattr(result, "safe_to_send", False):
+        nb_label += " [below threshold]"
+
+    return label + nb_label
+
+
 def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
                                 confidence_threshold: int = 70) -> dict:
     """
@@ -1289,13 +1381,20 @@ def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
     )
     method = result.detected_pattern.method if result.detected_pattern else "industry_fallback"
 
+    # Describe the SPECIFIC path that produced the winning email so operators
+    # can see at a glance how much to trust it — not just the generic
+    # "triangulation". Reads the candidate that matches best_email and
+    # translates its source + pattern + NB result into one short phrase.
+    # Exposed to the CSV as the "Email Source" column.
+    email_source_detail = _describe_email_source(result)
+
     return {
         "primary_email": result.best_email or "",
         "scraped_emails": result.evidence_trail.get("discovered_emails", []) or [],
         "constructed_emails": [c.get("email") for c in result.candidate_emails if c.get("email")],
         "contact_name": dm_name,
         "contact_title": dm_title,
-        "email_source": "triangulation",
+        "email_source": email_source_detail,
         "confidence": conf_bucket,
         "synthesis_reasoning": " | ".join(result.best_email_evidence[:3]),
         "synthesizer": "universal_v5",
