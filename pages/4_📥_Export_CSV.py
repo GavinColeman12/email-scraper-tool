@@ -235,15 +235,28 @@ st.divider()
 # ── Preview + export ──
 if filtered:
     st.subheader("Preview")
+    show_evidence = st.toggle(
+        "Show verification evidence columns (SMTP / WHOIS / NPI / Pattern)",
+        value=False,
+        help="These tick columns derive from the triangulation evidence trail. "
+             "Hidden by default to keep the preview readable.",
+    )
 
     # Verification badge: combines confidence + SMTP + email_source for quick UI
+    # Demotes 🟢 HIGH to 🟡 MEDIUM when the row is actually unsafe — i.e.
+    # catch-all domain (deliverable-looking but no mailbox guarantee) or
+    # triangulation marked email_safe_to_send=false. Keeps the badge
+    # honest so the operator doesn't ship unverified sends.
     def _verify_badge(biz):
         conf = biz.get("confidence", "") or ""
         src = biz.get("email_source", "") or ""
+        reason = (biz.get("email_verification_reason") or "").lower()
+        safe_flag = biz.get("email_safe_to_send")
+        is_unsafe = (safe_flag == 0 or safe_flag is False) or "catch-all" in reason
         if conf == "high" and "smtp_verified" in src:
-            return "🟢 VERIFIED"
+            return "🟢 VERIFIED" if not is_unsafe else "🟡 MED (catch-all)"
         if conf == "high":
-            return "🟢 HIGH"
+            return "🟢 HIGH" if not is_unsafe else "🟡 MED (catch-all)"
         if conf == "medium" and "unverified_with_signal" in src:
             return "🟡 MED (unverified)"
         if conf == "medium":
@@ -260,12 +273,31 @@ if filtered:
         contact_name = b.get("contact_name", "")
         first_name, last_name = split_contact_name(contact_name)
         source = (b.get("email_source") or "").lower()
-        # Derive the verification evidence from source suffixes + fields
-        smtp_ver = "✓" if "smtp_verified" in source else ""
-        whois_ver = "✓" if "whois_confirmed" in source else (
+        # Derive the verification evidence from source suffixes + fields.
+        # Triangulation rows set source="triangulation" and store agent
+        # successes in professional_ids JSON, so we consult both paths.
+        prof_obj = b.get("professional_ids") or {}
+        if isinstance(prof_obj, str):
+            try:
+                import json as _json
+                prof_obj = _json.loads(prof_obj)
+            except Exception:
+                prof_obj = {}
+        agents_ok = set((prof_obj.get("agents_succeeded") or []) if isinstance(prof_obj, dict) else [])
+        pattern_confirmed = bool(prof_obj.get("detected_pattern")) if isinstance(prof_obj, dict) else False
+
+        smtp_ver = "✓" if ("smtp_verified" in source or "smtp_probe" in agents_ok
+                           or "neverbounce" in agents_ok) else ""
+        whois_ver = "✓" if ("whois_confirmed" in source or "whois" in agents_ok) else (
             "✗" if "whois_mismatch" in source else ""
         )
-        npi_ver = "✓" if "npi_registry" in source or "_pattern_confirmed" in source or "_npi_anchored" in source else ""
+        npi_ver = "✓" if (
+            "npi_registry" in source
+            or "_pattern_confirmed" in source
+            or "_npi_anchored" in source
+            or "npi_healthcare" in agents_ok
+            or pattern_confirmed
+        ) else ""
         # Carry the triangulation evidence trail into the CSV so the audit
         # tool preserves it instead of discarding $5/business of work.
         prof_ids = b.get("professional_ids") or ""
@@ -275,13 +307,16 @@ if filtered:
                 prof_ids = _json.dumps(prof_ids)
             except Exception:
                 prof_ids = ""
-        export_rows.append({
+        row = {
             "Badge": _verify_badge(b),
             "Score": b.get("lead_quality_score", ""),
             "Tier": b.get("lead_tier", ""),
-            "SMTP ✓": smtp_ver,
-            "WHOIS ✓": whois_ver,
-            "NPI/Pattern ✓": npi_ver,
+        }
+        if show_evidence:
+            row["SMTP ✓"] = smtp_ver
+            row["WHOIS ✓"] = whois_ver
+            row["NPI/Pattern ✓"] = npi_ver
+        row.update({
             "Business Name": b.get("business_name", ""),
             "Business Type": b.get("business_type", ""),
             "Location": b.get("address", ""),
@@ -302,6 +337,7 @@ if filtered:
             # rework and preserve triangulation context for email gen.
             "Professional IDs": prof_ids,
         })
+        export_rows.append(row)
 
     df = pd.DataFrame(export_rows)
     # Sort by lead quality score DESC

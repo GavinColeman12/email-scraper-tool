@@ -14,8 +14,14 @@ from src.email_verifier import (
 )
 from src.secrets import get_secret
 
-st.set_page_config(page_title="Verify Deliverability", page_icon="✅", layout="wide")
-st.title("✅ Verify Email Deliverability")
+st.set_page_config(page_title="Re-verify Emails", page_icon="✅", layout="wide")
+st.title("✅ Re-verify Existing Emails (optional)")
+st.warning(
+    "⚠️ **Bulk Scrape already verifies emails in-pipeline via NeverBounce.** "
+    "Only use this page to (a) re-verify stale results months later, "
+    "(b) verify emails added manually, or (c) cross-check a suspicious send. "
+    "Running it on fresh Bulk Scrape output re-spends credits for no new signal."
+)
 
 storage.init_db()
 

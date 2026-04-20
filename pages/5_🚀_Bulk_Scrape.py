@@ -294,6 +294,25 @@ filtered = [
     and (b.get("rating") or 0) >= min_rating
 ]
 
+# If the combined filter knocks everything out, show which knob dropped what
+# so the user knows which threshold to loosen. Otherwise "No leads pass"
+# leaves them guessing between 3 filters.
+if ranked and not filtered:
+    dropped_score = sum(1 for b in ranked if b.get("lead_quality_score", 0) < min_score)
+    dropped_tier = sum(1 for b in ranked if b.get("lead_tier", "") not in tier_filter)
+    dropped_conf = sum(
+        1 for b in ranked
+        if b.get("confidence") and b.get("confidence", "") not in conf_filter
+    )
+    dropped_rating = sum(1 for b in ranked if (b.get("rating") or 0) < min_rating)
+    st.caption(
+        f"Filters dropped: score&lt;{min_score} · **{dropped_score}** · "
+        f"tier not in {tier_filter} · **{dropped_tier}** · "
+        f"confidence not in {conf_filter} · **{dropped_conf}** · "
+        f"rating&lt;{min_rating} · **{dropped_rating}**. "
+        f"(Businesses may be dropped by multiple filters.)"
+    )
+
 # ── Pick top N ──
 top_col1, top_col2 = st.columns([3, 1])
 with top_col1:
