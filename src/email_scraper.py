@@ -36,6 +36,20 @@ GENERIC_PREFIXES = {
     "appointments",
 }
 
+# Template/placeholder local parts. These appear verbatim in contact-form
+# HTML attributes ("placeholder=first@yourdomain.com"), JS email-assembly
+# snippets (`'first' + '@' + domain`), and sample text in page templates.
+# Any email whose local part exactly matches one of these is a placeholder,
+# not a real mailbox.
+PLACEHOLDER_LOCALS = {
+    "first", "last", "firstname", "lastname", "fname", "lname",
+    "your", "you", "youremail", "your-email", "your_email",
+    "name", "username", "user", "email", "mail",
+    "example", "example1", "example2", "sample", "template",
+    "placeholder", "changeme", "yourname", "yourcompany",
+    "domain", "yourdomain", "here", "youraddress",
+}
+
 # Addresses to reject entirely (CDN/service emails, not the business)
 REJECTED_PATTERNS = [
     r"@(sentry|cloudflare|amazonaws|googleapis|google-analytics|wixpress|squarespace|shopify|hubspot|intercom|mailchimp|sendgrid|stripe|twilio|wordpress|elementor|wp-engine)",
@@ -143,6 +157,15 @@ def _extract_domain(website: str) -> str:
 
 def _is_rejected(email: str) -> bool:
     email_lower = email.lower()
+    # Placeholder local-parts ("first@domain", "youremail@domain", etc.)
+    if "@" in email_lower:
+        local = email_lower.split("@", 1)[0]
+        if local in PLACEHOLDER_LOCALS:
+            return True
+        # Strip one trailing numeric suffix (example1 → example, name2 → name)
+        stripped = re.sub(r"\d+$", "", local)
+        if stripped and stripped in PLACEHOLDER_LOCALS:
+            return True
     for pat in REJECTED_PATTERNS:
         if re.search(pat, email_lower):
             return True

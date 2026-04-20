@@ -546,6 +546,58 @@ def _extract_city_state(addr: str) -> tuple[str, str]:
     return "", _extract_state(addr)
 
 
+def _extract_postal_code(addr: str) -> str:
+    m = re.search(r"\b(\d{5})(?:-\d{4})?\b", addr or "")
+    return m.group(1) if m else ""
+
+
+def _is_wrong_territory(
+    cand: "OwnerCandidate", business_name: str, domain: str, address: str,
+) -> bool:
+    """
+    Reject candidates whose source_url is on an UNRELATED domain AND
+    whose source URL doesn't carry any token from the business address
+    (city/state or long business-name tokens). Defense-in-depth against
+    cases where the location-anchored query still returns an off-territory
+    hit — e.g., "Manhattan Dental" in Manhattan, MT attributed to
+    "One Manhattan Dental" in NYC.
+    """
+    src = (cand.source_url or "").lower()
+    if not src:
+        return False
+    if domain and domain.lower() in src:
+        return False  # same registrable domain as the business → trust it
+    # LinkedIn profile slugs virtually never carry geographic tokens —
+    # exempting them here preserves the primary owner-sourcing channel.
+    # A bad LinkedIn attribution is caught by the name_classifier + synthesis
+    # layers, not this filter.
+    if "linkedin.com/in/" in src:
+        return False
+    city, state = _extract_city_state(address or "")
+    tokens: set[str] = set()
+    if city:
+        tokens.add(city.lower().replace(" ", ""))
+        tokens.add(city.lower().replace(" ", "-"))
+    if state:
+        tokens.add(state.lower())
+    # Long tokens from the business name (4+ chars) — "manhattan" alone
+    # isn't specific enough to anchor, but the state token above makes it
+    # specific ("mt" present in onemanhattandental.com? no → rejects).
+    for tok in re.findall(r"[A-Za-z]{4,}", business_name or ""):
+        tokens.add(tok.lower())
+    # Require state OR (city AND a business-name token) to be in source URL
+    if state and state.lower() in src:
+        return False
+    city_tok = city.lower().replace(" ", "") if city else ""
+    if city_tok and city_tok in src:
+        # Only count a city token if a business-name token also matches,
+        # avoids "Manhattan" matching onemanhattandental.com
+        for tok in re.findall(r"[A-Za-z]{4,}", business_name or ""):
+            if tok.lower() != city_tok and tok.lower() in src:
+                return False
+    return True  # no territory signal in source_url → off-territory
+
+
 def _is_junk_name(name: str, business_name: str = "") -> bool:
     """
     Reject anything that's clearly NOT a person's name.
@@ -678,7 +730,7 @@ def _extract_names_with_titles(
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _agent_combined_owner_and_press(
-    business_name: str, domain: str, cache: _Cache
+    business_name: str, domain: str, address: str, cache: _Cache
 ) -> tuple[list[OwnerCandidate], list[str], list[str]]:
     """
     MERGED AGENT (was 2 searches in v4, now 1).
@@ -688,23 +740,22 @@ def _agent_combined_owner_and_press(
       - @domain emails (via regex across same snippets)
       - LinkedIn URLs (used by the gating logic to skip linkedin_via_google)
 
+    The query is location-anchored (city + state) so "Manhattan Dental" in
+    Montana doesn't get attributed to "One Manhattan Dental" in NYC. The
+    cache key includes city|state too so the MT result and the NYC result
+    don't collide.
+
     Saves ~1 SearchApi credit per business.
     """
-    cached = cache.get("owner_candidates", "combined", business_name, domain)
+    city, state = _extract_city_state(address or "")
+    cache_geo = f"{city}|{state}"
+    cached = cache.get("owner_candidates", "combined_v2", business_name, domain, cache_geo)
     if cached is not None:
-        # Lazily re-validate cached candidates against the CURRENT
-        # _is_junk_name rules. Old cache entries from before the
-        # stopword expansion are filtered out here without requiring
-        # a manual cache bust.
         raw = [OwnerCandidate(**c) for c in cached.get("candidates", [])]
         candidates = [
             c for c in raw
             if not _is_junk_name(c.full_name, business_name=business_name)
         ]
-        # Seamless-retry guard: if the cached list was non-empty but
-        # ALL of it is now garbage under current rules, the cache is
-        # stale under a newer validation regime. Fall through to a
-        # fresh SearchApi call rather than returning an empty list.
         if raw and not candidates:
             logger.info(
                 f"cache miss-through: all {len(raw)} cached owner "
@@ -719,11 +770,16 @@ def _agent_combined_owner_and_press(
     if not api_key:
         return [], [], []
 
-    query = (
-        f'"{business_name}" (owner OR founder OR CEO OR president OR principal) '
-        f'(email OR "@{domain}")' if domain else
-        f'"{business_name}" (owner OR founder OR CEO OR president OR principal) email'
-    )
+    loc_clause = ""
+    if city and state:
+        loc_clause = f' "{city}, {state}"'
+    elif state:
+        loc_clause = f' "{state}"'
+    role_clause = "(owner OR founder OR CEO OR president OR principal)"
+    if domain:
+        query = f'"{business_name}"{loc_clause} {role_clause} (email OR "@{domain}")'
+    else:
+        query = f'"{business_name}"{loc_clause} {role_clause} email'
     try:
         resp = requests.get(
             "https://www.searchapi.io/api/v1/search",
@@ -766,7 +822,10 @@ def _agent_combined_owner_and_press(
             candidates.append(cand)
 
         if email_pat:
-            emails.update(m.lower() for m in email_pat.findall(blob))
+            from src.email_scraper import _is_rejected
+            emails.update(
+                m.lower() for m in email_pat.findall(blob) if not _is_rejected(m)
+            )
 
     cache.set(
         "owner_candidates",
@@ -775,7 +834,7 @@ def _agent_combined_owner_and_press(
             "emails": list(emails),
             "linkedin_urls": linkedin_urls,
         },
-        "combined", business_name, domain,
+        "combined_v2", business_name, domain, cache_geo,
     )
     return candidates, list(emails), linkedin_urls
 
@@ -846,12 +905,17 @@ def _agent_website_scrape(
             c for c in raw
             if not _is_junk_name(c.full_name, business_name=business_name)
         ]
+        # Lazy re-filter cached emails against the current PLACEHOLDER_LOCALS
+        # rules so old entries holding "first@domain" template leaks get
+        # scrubbed on next read without a cache bust.
+        from src.email_scraper import _is_rejected
+        cached_emails = [e for e in cached.get("emails", []) if not _is_rejected(e)]
         # If ALL cached names are junk, don't just return emails with an
         # empty candidate list — re-scrape the website and get fresh
         # candidates. Website scrape is FREE (no API credit), so the
         # cost of the retry is just bandwidth.
         if not (raw and not candidates):
-            return candidates, cached.get("emails", [])
+            return candidates, cached_emails
 
     paths = [
         "/", "/about", "/about-us", "/team", "/our-team", "/meet-the-team",
@@ -874,12 +938,17 @@ def _agent_website_scrape(
             continue
 
         try:
+            from src.email_scraper import _is_rejected
+        except Exception:
+            def _is_rejected(_e): return False
+
+        try:
             hidden = extract_all_hidden_emails(r.text) or {}
             for src_emails in hidden.values():
-                emails.update(src_emails)
+                emails.update(e for e in src_emails if not _is_rejected(e))
         except Exception:
             pass
-        emails.update(email_pat.findall(r.text))
+        emails.update(e for e in email_pat.findall(r.text) if not _is_rejected(e))
 
         text = _strip_html(r.text)
         for cand in _extract_names_with_titles(text, business_name=business_name):
@@ -1068,18 +1137,22 @@ def _agent_places(
 def _agent_npi_healthcare(
     business_name: str, address: str, industry: str, cache: _Cache
 ) -> list[OwnerCandidate]:
-    """Healthcare-only NPI fallback, with the v3 field-mapping bug FIXED."""
-    cached = cache.get("owner_candidates", "npi", business_name, address)
+    """Healthcare-only NPI fallback. Queries NPI-1 (individual providers)
+    by postal_code + taxonomy, then filters by street/business tokens."""
+    # Cache key bumped to v2 — the old npi cache holds all-empty results
+    # from the buggy organization_name+NPI-2 query.
+    cached = cache.get("owner_candidates", "npi_v2", business_name, address)
     if cached is not None:
         raw = [OwnerCandidate(**c) for c in cached]
         filt = [c for c in raw
                 if not _is_junk_name(c.full_name, business_name=business_name)]
-        # Fall through on all-garbage; NPI is free (US gov API)
-        if not (raw and not filt):
+        # Fall through on empty or all-garbage; NPI is free (US gov API)
+        if raw and not (raw and not filt):
             return filt
 
     city, state = _extract_city_state(address)
-    if not state:
+    postal = _extract_postal_code(address)
+    if not (state or postal):
         return []
 
     i = industry.lower() if industry else ""
@@ -1087,10 +1160,27 @@ def _agent_npi_healthcare(
                       "Chiropractor" if "chiro" in i else \
                       "Physician" if ("physic" in i or "medic" in i) else ""
 
-    params = {"version": "2.1", "organization_name": business_name,
-              "state": state, "limit": 30}
-    if city:
-        params["city"] = city
+    # NPI Registry has TWO disjoint record types:
+    #   NPI-1 (individuals) — have first_name / last_name
+    #   NPI-2 (organizations) — have organization_name, no first/last
+    # The previous impl queried by organization_name (only matches NPI-2)
+    # then parsed basic.first_name (only exists on NPI-1) → zero matches.
+    # Fix: query NPI-1 by postal_code + taxonomy, which returns every
+    # licensed provider in the ZIP. We then trust the LLM/synthesis layer
+    # (and Phase 2 junk-name filter) to pick the ones affiliated with
+    # this specific practice.
+    params = {
+        "version": "2.1",
+        "enumeration_type": "NPI-1",
+        "limit": 50,
+    }
+    if postal:
+        params["postal_code"] = postal
+    else:
+        # Fallback to city/state when the address didn't include a ZIP
+        params["state"] = state
+        if city:
+            params["city"] = city
     if taxonomy_filter:
         params["taxonomy_description"] = taxonomy_filter
 
@@ -1103,6 +1193,30 @@ def _agent_npi_healthcare(
         logger.warning(f"npi: {e}")
         return []
 
+    # Lightly filter by address tokens so we don't flood synthesis with
+    # every dentist in the ZIP. Match on street-name tokens OR business-name
+    # tokens from the NPI record's LOCATION address.
+    street_tokens: set[str] = set()
+    for tok in re.findall(r"[A-Za-z]{3,}", address or ""):
+        street_tokens.add(tok.lower())
+    biz_tokens: set[str] = set()
+    for tok in re.findall(r"[A-Za-z]{4,}", business_name or ""):
+        biz_tokens.add(tok.lower())
+
+    def _record_matches_location(rec: dict) -> bool:
+        if not (street_tokens or biz_tokens):
+            return True
+        for addr_rec in rec.get("addresses", []) or []:
+            if (addr_rec.get("address_purpose") or "").upper() != "LOCATION":
+                continue
+            line = " ".join(
+                str(addr_rec.get(k, "")) for k in ("address_1", "address_2")
+            ).lower()
+            if any(t in line for t in street_tokens):
+                return True
+        # Secondary: organization/practice name match on NPI-2 link (unlikely for NPI-1)
+        return False
+
     candidates: list[OwnerCandidate] = []
     for rec in data.get("results", []):
         basic = rec.get("basic", {})
@@ -1110,7 +1224,8 @@ def _agent_npi_healthcare(
         last = (basic.get("last_name") or "").strip().title()
         if not first or not last:
             continue
-        # v3 BUG FIX: pull real credential from taxonomy, not a fallback string
+        if not _record_matches_location(rec):
+            continue
         taxonomies = rec.get("taxonomies", [])
         primary_tax = next((t for t in taxonomies if t.get("primary")),
                            taxonomies[0] if taxonomies else {})
@@ -1119,13 +1234,12 @@ def _agent_npi_healthcare(
             full_name=f"{first} {last}",
             first_name=first, last_name=last,
             title=credential, source="npi",
-            # v3 BUG FIX: the NPI number is under "number", NOT "npi"
             source_url=f"https://npiregistry.cms.hhs.gov/provider-view/{rec.get('number')}",
             raw_snippet=f"NPI {rec.get('number')} | {credential}",
         ))
 
     cache.set("owner_candidates", [asdict(c) for c in candidates],
-              "npi", business_name, address)
+              "npi_v2", business_name, address)
     return candidates
 
 
@@ -1262,26 +1376,63 @@ def _generate_candidates(
     scraped_emails = scraped_emails or []
     d_lower = domain.lower()
 
-    # Guardrail: the bare `first@domain` pattern is off by default. It's
-    # only valid for solo practitioners and a few consumer-facing verticals
-    # where it's conventional. Everywhere else it guesses at a shared
-    # mailbox. Opt-in only (allow_first_only_pattern=True).
+    # Guardrail: the bare `first@domain` pattern is off by default for
+    # INDUSTRY-PRIOR guesses — it's only valid for solo practitioners and a
+    # few consumer-facing verticals where it's conventional. But when a
+    # `first@` pattern is triangulated from real evidence (an actual email
+    # like marc@domain tied to owner Marc), that's not a guess — it's proof.
+    # Triangulated evidence always flows through regardless of this guard.
     def _block_first_only(pat: str) -> bool:
         return pat == "first" and not allow_first_only_pattern
+
+    # A detected_pattern is "proven" when triangulation tied it to at least
+    # one real email. In that case we treat it as evidence, not a prior.
+    pattern_is_proven = bool(
+        detected_pattern
+        and getattr(detected_pattern, "evidence_emails", None)
+        and len(detected_pattern.evidence_emails) >= 1
+    )
 
     # Emit scraped-direct candidates FIRST (up to 2 slots). These carry
     # the highest source-evidence weight in the scorer because the business
     # literally published them. Scorer's specificity cap correctly ranks
     # generic inboxes (info@) below personal mailboxes (drjones@).
-    scraped_slot_budget = 2
+    #
+    # Deterministic ordering: normalize + dedupe + sort so set-iteration
+    # order doesn't pick different emails on different runs. Then PREFER
+    # emails already cached as NB-valid — preserves safe_to_send leads
+    # across replays instead of picking whichever scraped email happened
+    # to come first in set iteration order.
+    try:
+        _cache_for_nb = get_cache()
+    except Exception:
+        _cache_for_nb = None
+
+    normalized = []
     for scraped in scraped_emails:
-        if scraped_slot_budget <= 0:
-            break
         email = (scraped or "").lower().strip()
         if not email or "@" not in email:
             continue
         if not email.endswith("@" + d_lower):
             continue
+        normalized.append(email)
+    normalized = sorted(set(normalized))
+
+    def _nb_valid_rank(email: str) -> int:
+        # Returns 0 if cached NB-valid, 1 if cached catchall/unknown, 2 if uncached.
+        if _cache_for_nb is None:
+            return 2
+        cached = _cache_for_nb.get("nb_verify", email)
+        if not cached:
+            return 2
+        return 0 if cached.get("result") == "valid" else 1
+
+    normalized.sort(key=_nb_valid_rank)
+
+    scraped_slot_budget = 2
+    for email in normalized:
+        if scraped_slot_budget <= 0:
+            break
         if email in seen:
             continue
         candidates.append({
@@ -1293,13 +1444,22 @@ def _generate_candidates(
         seen.add(email)
         scraped_slot_budget -= 1
 
-    if detected_pattern and detected_pattern.confidence >= 70 \
-            and not _block_first_only(detected_pattern.pattern_name):
+    # Apply the detected pattern to the DM's name. Triangulated evidence
+    # (pattern_is_proven) bypasses the first-only guard since it's not a
+    # blind guess — we've seen the pattern in a real email at this domain.
+    # A proven pattern's base_confidence is boosted to 80 (above the 75
+    # that scraped_direct gets) so the DM's personalized email outranks
+    # generic scraped inboxes like info@ when both pass NB verification.
+    if detected_pattern and detected_pattern.confidence >= 70 and (
+        pattern_is_proven or not _block_first_only(detected_pattern.pattern_name)
+    ):
         email = build_email(detected_pattern.pattern_name, first, last, domain)
         if email and email not in seen:
+            base = max(detected_pattern.confidence, 80) if pattern_is_proven \
+                else detected_pattern.confidence
             candidates.append({"email": email, "pattern": detected_pattern.pattern_name,
                                "source": "detected_pattern",
-                               "base_confidence": detected_pattern.confidence})
+                               "base_confidence": base})
             seen.add(email)
 
     try:
@@ -1334,7 +1494,10 @@ def _generate_candidates(
                            "base_confidence": 45})
         seen.add(fl)
 
-    return candidates[:4]
+    # Cap at 5 so industry-prior patterns (drlast, flast) still enter the
+    # pool when scraped_direct fills 2 slots + detected_pattern fills 1.
+    # NB budget is 4 main + 1 guaranteed DM probe = 5, which matches.
+    return candidates[:5]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1431,7 +1594,7 @@ def triangulate_email(
 
     with ThreadPoolExecutor(max_workers=5) as ex:
         fut_combined = ex.submit(
-            _agent_combined_owner_and_press, business_name, domain, cache
+            _agent_combined_owner_and_press, business_name, domain, address, cache
         )
         fut_website = ex.submit(
             _agent_website_scrape, website, domain, business_name, cache
@@ -1454,6 +1617,15 @@ def triangulate_email(
             c_cands, c_emails, c_lnk = fut_combined.result(timeout=20)
             if c_cands or c_emails:
                 result.agents_succeeded.append("combined_owner_press")
+            # Reject candidates whose source URL is off-territory (e.g.
+            # NYC dentist returned for a Montana business). See L7.
+            before_n = len(c_cands)
+            c_cands = [
+                c for c in c_cands
+                if not _is_wrong_territory(c, business_name, domain, address)
+            ]
+            if before_n != len(c_cands):
+                result.evidence_trail["territory_filtered"] = before_n - len(c_cands)
             all_candidates.extend(c_cands)
             all_emails.update(c_emails)
             linkedin_urls.extend(c_lnk)
@@ -1644,6 +1816,12 @@ def triangulate_email(
     # (which tells us no further NB call will help). SMTP gate removed
     # — hosted envs (Streamlit Cloud, most VMs) block port 25 so
     # smtp_valid is almost always False and would gate NB off.
+    #
+    # ADDITIONALLY, even when the primary walk stops early (first valid),
+    # we always guarantee the triangulated DM candidate gets NB-tested so
+    # the user sees its verdict alongside the generic inbox. Otherwise a
+    # scraped info@ that returns valid would silently hide whether the
+    # DM's personalized email is deliverable.
     if use_neverbounce:
         for c in candidates:
             c["confidence"] = _candidate_confidence(c, result.detected_pattern)
@@ -1664,6 +1842,18 @@ def triangulate_email(
                 continue  # try the next pattern
             # catchall / unknown / error — no point probing further
             break
+
+        # Guarantee: if the triangulated DM candidate exists and wasn't
+        # tested in the main walk, run +1 NB on it. Budget cap is 5
+        # total (4 + 1 guaranteed DM probe). Cached NB results are free.
+        dm_candidate = next(
+            (c for c in candidates if c.get("source") == "detected_pattern"),
+            None,
+        )
+        if dm_candidate and "nb_result" not in dm_candidate:
+            nb = _nb_verify_cached(dm_candidate["email"], cache)
+            dm_candidate["nb_valid"] = nb.get("safe_to_send", False)
+            dm_candidate["nb_result"] = nb.get("result")
 
         result.agents_run.append("neverbounce")
         if any(c.get("nb_result") for c in candidates):
