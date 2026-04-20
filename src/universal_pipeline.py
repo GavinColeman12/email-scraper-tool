@@ -1512,7 +1512,30 @@ def triangulate_email(
         except Exception:
             pass
 
+    # ── PHASE 1.5: LLM name classifier (Haiku, cached) ──
+    # Before synthesis, ask Haiku which names are actually real people vs.
+    # SEO spam / UI fragments / business descriptors. Replaces the stopword
+    # treadmill. ~$0.001-0.002 per business, cached per candidate list so
+    # re-runs are free. On failure (no API key / API error) we fall through
+    # to the existing stopword-based _is_junk_name filter in synthesis.
+    if all_candidates:
+        result.agents_run.append("llm_name_filter")
+        try:
+            from src.name_classifier import filter_real_people
+            filtered = filter_real_people(
+                all_candidates, business_name, domain, cache
+            )
+            if filtered is not None:
+                before = len(all_candidates)
+                all_candidates = filtered
+                result.agents_succeeded.append("llm_name_filter")
+                result.evidence_trail["llm_filter_removed"] = before - len(filtered)
+        except Exception as e:
+            logger.warning(f"llm name filter failed: {e}")
+
     # ── PHASE 2: Synthesise owners ──
+    # _synthesise_owners still runs _is_junk_name as a secondary stopword
+    # defense — belt + suspenders against Haiku edge cases.
     ranked = _synthesise_owners(all_candidates, business_name)
     result.all_owners = ranked
 
