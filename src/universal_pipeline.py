@@ -1862,14 +1862,71 @@ def _probe_smtp_cached(email: str, cache: _Cache) -> dict:
 def _nb_verify_cached(email: str, cache: _Cache) -> dict:
     cached = cache.get("nb_verify", email)
     if cached is not None:
-        return cached
+        # If the cached entry is from a credit-exhaustion event, don't
+        # trust it — re-query so a topped-up account picks up fresh
+        # results. `credit_exhausted` flag is set below whenever NB
+        # reported 0 credits.
+        if not cached.get("credit_exhausted"):
+            return cached
+
+    # Pre-flight: skip entirely if we know the account has 0 credits.
+    # Cached for 5 minutes so we don't poll NB on every call.
+    if not _nb_credits_available():
+        return {"safe_to_send": False, "result": "unknown",
+                "credit_exhausted": True, "error": "nb_credits_depleted"}
+
     try:
         r = _nb_verify_raw(email)
         result = {"safe_to_send": bool(r.safe_to_send), "result": r.result}
+        # Detect the specific credit-exhaustion error from the NB
+        # integration's flag set, and mark the cache entry so it gets
+        # re-queried once credits are topped up.
+        if getattr(r, "flags", None) and any(
+            "Insufficient credit" in str(f) for f in r.flags
+        ):
+            result["credit_exhausted"] = True
+            _mark_nb_credits_exhausted()
     except Exception as e:
         result = {"safe_to_send": False, "result": None, "error": str(e)}
     cache.set("nb_verify", result, email)
     return result
+
+
+# ── NB credit availability (5-minute cache) ──
+_NB_CREDITS_STATE = {"checked_at": 0.0, "available": True}
+
+
+def _nb_credits_available() -> bool:
+    """
+    Return False when we know the NB account has 0 remaining credits.
+    Checks once every 5 minutes (or on explicit _mark_nb_credits_*).
+    Defaults to True when we haven't checked yet or the account check
+    itself fails (fail open — let the real API call surface the error).
+    """
+    import time as _t
+    now = _t.time()
+    if now - _NB_CREDITS_STATE["checked_at"] < 300:
+        return _NB_CREDITS_STATE["available"]
+    try:
+        from src.neverbounce import get_account_info
+        info = get_account_info()
+        credits = info.get("credits_info") or {}
+        available = (
+            (credits.get("paid_credits_remaining") or 0)
+            + (credits.get("free_credits_remaining") or 0)
+        ) > 0
+    except Exception:
+        available = True  # fail open — don't block on account-check errors
+    _NB_CREDITS_STATE["checked_at"] = now
+    _NB_CREDITS_STATE["available"] = available
+    return available
+
+
+def _mark_nb_credits_exhausted() -> None:
+    """Called when an NB response indicates 0 credits — stops the bleed."""
+    import time as _t
+    _NB_CREDITS_STATE["checked_at"] = _t.time()
+    _NB_CREDITS_STATE["available"] = False
 
 
 def _candidate_confidence(candidate: dict, pattern: Optional[DetectedPattern]) -> int:

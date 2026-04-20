@@ -32,6 +32,35 @@ try:
 except Exception:
     pass
 
+# ── NeverBounce credit check ──
+# Warns before the run starts if NB is out of credits — prevents
+# burning 15+ minutes on a bulk scrape that can't verify anything
+# and silently produces "unknown" for every candidate.
+try:
+    from src.neverbounce import get_account_info, is_available as _nb_available
+    if _nb_available():
+        _nb_info = get_account_info()
+        _credits = _nb_info.get("credits_info", {}) if isinstance(_nb_info, dict) else {}
+        _total_credits = (
+            int(_credits.get("paid_credits_remaining") or 0)
+            + int(_credits.get("free_credits_remaining") or 0)
+        )
+        if _total_credits == 0:
+            st.error(
+                "⚠️ **NeverBounce account has 0 credits remaining.** "
+                "Volume/Triangulation modes will run but every candidate will return "
+                "`unknown` — you'll see lots of 🟡 MEDIUM instead of 🟢 HIGH. "
+                "[Top up at neverbounce.com](https://app.neverbounce.com/account/billing) "
+                "before starting a bulk run."
+            )
+        elif _total_credits < 100:
+            st.warning(
+                f"⚠️ NeverBounce has only **{_total_credits}** credits left — "
+                f"a 200-biz volume run uses ~600-800. Top up if needed."
+            )
+except Exception:
+    pass  # never block the UI on an NB status check
+
 # ── Active jobs banner ──
 background_jobs.render_active_banner(st)
 
