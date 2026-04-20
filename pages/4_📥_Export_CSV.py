@@ -333,56 +333,16 @@ if filtered:
         mime="text/csv",
     )
 
-    # Apollo-compatible format (for tools that expect Apollo columns)
-    apollo_rows = []
-    for row in export_rows:
-        # Reuse the split we already computed for the generic export —
-        # proper title/credential stripping
-        first = row.get("First Name", "")
-        last = row.get("Last Name", "")
-        # Parse "Astoria NY" style into city + state if possible
-        loc = row["Location"]
-        city = ""
-        state = ""
-        parts = [p.strip() for p in loc.split(",")]
-        if len(parts) >= 2:
-            city = parts[-2].strip()
-            state_zip = parts[-1].strip()
-            state = state_zip.split()[0] if state_zip else ""
-        else:
-            city = loc
-
-        apollo_rows.append({
-            "First Name": first,
-            "Last Name": last,
-            "Title": row["Contact Title"],
-            "Company Name": row["Business Name"],
-            "Email": row["Email"],
-            "Email Status": "Verified" if row["Email Status"] == "valid" else "",
-            "# Employees": "",
-            "Industry": row["Business Type"],
-            "Website": row["Website"],
-            "Company City": city,
-            "Company State": state,
-            "Country": "United States",
-            "Corporate Phone": row["Phone"],
-            "Company Phone": row["Phone"],
-            "Company Address": row["Location"],
-        })
-    apollo_df = pd.DataFrame(apollo_rows)
-    buf2 = io.StringIO()
-    apollo_df.to_csv(buf2, index=False)
-    st.download_button(
-        f"📥 Download as Apollo-format CSV ({len(apollo_df)} rows)",
-        data=buf2.getvalue(),
-        file_name=f"scraped_prospects_apollo_format_{search_id}.csv",
-        mime="text/csv",
-        help="Use this format if your tool expects Apollo.io column names",
-    )
+    # Apollo-format CSV was removed — it silently dropped the
+    # triangulation evidence (Place ID, Professional IDs, Score/Tier,
+    # Confidence, Email Source/Status), losing ~$5/business of enrichment
+    # work. The generic CSV above carries everything the audit tool needs.
 
     st.info(
         "💡 In the reputation audit tool, go to **📥 Import Prospects → Upload CSV** "
-        "and drop either file in. The audit tool auto-detects the format."
+        "and drop the generic CSV in. All the scraper's evidence (triangulation "
+        "trail, place_id, rating) comes across so the audit tool skips its own "
+        "enrichment step."
     )
 else:
     st.info("No businesses match the current filters.")
