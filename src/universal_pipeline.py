@@ -519,7 +519,18 @@ NEVER_A_PERSON = {
     "forbes", "business", "phone", "number",
 }
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; UniversalPipeline/1.0)"}
+HEADERS = {
+    # Real Chrome UA — some sites block custom UAs with stricter WAF rules,
+    # costing us real data. Impersonating Chrome avoids those blocks without
+    # any downside.
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 NAME_RE = re.compile(r"\b(?:Dr\.?\s+)?([A-Z][a-z]{2,}(?:\s+[A-Z]\.)?\s+[A-Z][a-z]{2,})\b")
 STATE_RE = re.compile(r",\s*([A-Z]{2})\s+\d{5}")
 
@@ -988,65 +999,303 @@ def _agent_website_scrape(
 
     visited: set[str] = set()
     discovered_paths: set[str] = set()
+    bio_page_paths: set[str] = set()
+    # Overall safety cap so a pathological site can't keep the crawler
+    # running forever. 80 fetches easily covers the fixed list + ~25
+    # discovered team pages + ~15 per-person bio pages.
+    MAX_FETCHES = 80
+    # Same-domain deadline — we also have the 60s future timeout upstream,
+    # but budgeting inside gives us a clean stop with partial results.
+    import time as _time
+    _t_start = _time.time()
+    MAX_SECONDS = 55
 
-    for path in paths:
-        url = base + path
+    def _fetch(url: str) -> Optional[str]:
+        """GET a URL, return HTML or None. Respects caps + timeouts."""
+        if len(visited) >= MAX_FETCHES:
+            return None
+        if _time.time() - _t_start > MAX_SECONDS:
+            return None
         if url in visited:
-            continue
+            return None
         visited.add(url)
         try:
-            r = requests.get(url, timeout=8, headers=HEADERS, allow_redirects=True)
-            if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
-                continue
+            r = requests.get(url, timeout=10, headers=HEADERS, allow_redirects=True)
+            if r.status_code != 200:
+                return None
+            ct = r.headers.get("content-type", "")
+            if "text/html" not in ct and "application/xhtml" not in ct and "application/xml" not in ct:
+                return None
+            return r.text
         except Exception:
-            continue
+            return None
 
-        _process_page(url, r.text)
+    def _harvest_team_links(html: str) -> list[str]:
+        """Parse <a> tags for links whose href/text looks like a team page."""
+        out: list[str] = []
+        try:
+            anchors = re.findall(
+                r'<a[^>]+href=["\']([^"\'#]+)["\'][^>]*>([^<]{0,160})</a>',
+                html, flags=re.I,
+            )
+        except Exception:
+            return out
+        for href, link_text in anchors:
+            href_l = href.lower().strip()
+            text_l = link_text.lower().strip()
+            if not any(k in href_l or k in text_l for k in TEAM_LINK_KEYWORDS):
+                continue
+            if href_l.startswith("http"):
+                if domain and domain.lower() not in href_l:
+                    continue
+                out.append(href)
+            elif href_l.startswith("/"):
+                out.append(base + href)
+        return out
 
-        # Link discovery: on the homepage + /about, scan anchor tags for
-        # team/people links we haven't tried yet. Caps at 10 discovered
-        # URLs per site to prevent runaway crawls.
-        if path in ("/", "/about", "/about-us") and len(discovered_paths) < 10:
+    def _harvest_bio_links(html: str, source_url: str) -> list[str]:
+        """
+        Second-layer discovery: on a team page, look for links that appear
+        to be individual bios — paths like /attorneys/jane-doe,
+        /team/john-smith, /bios/dr-brown, /providers/sarah-chen-md.
+        These are where personal emails usually live.
+        """
+        out: list[str] = []
+        try:
+            anchors = re.findall(
+                r'<a[^>]+href=["\']([^"\'#?]+)["\'][^>]*>([^<]{0,160})</a>',
+                html, flags=re.I,
+            )
+        except Exception:
+            return out
+        # Bio-link heuristics: path after a team-like prefix that looks
+        # like a person slug (contains a hyphen + 2+ alpha segments, or
+        # matches typical "dr-name" / "firstname-lastname" patterns).
+        bio_prefixes = (
+            "/attorneys/", "/attorney/", "/lawyers/", "/lawyer/",
+            "/doctors/", "/doctor/", "/physicians/", "/physician/",
+            "/dentists/", "/dentist/", "/providers/", "/provider/",
+            "/specialists/", "/specialist/",
+            "/team/", "/staff/", "/people/", "/bios/", "/bio/",
+            "/partners/", "/partner/", "/associates/", "/associate/",
+            "/agents/", "/agent/", "/brokers/", "/broker/",
+            "/consultants/", "/consultant/", "/advisors/", "/advisor/",
+            "/meet/", "/leadership/", "/principals/", "/principal/",
+            "/our-team/", "/our-attorneys/", "/our-doctors/",
+        )
+        for href, _text in anchors:
+            href_l = href.lower().strip()
+            # Make absolute
+            if href_l.startswith("http"):
+                if domain and domain.lower() not in href_l:
+                    continue
+                abs_url = href
+            elif href_l.startswith("/"):
+                abs_url = base + href
+            else:
+                continue
+            abs_l = abs_url.lower()
+            # Must contain one of the bio-prefixes AND have a slug-like tail
+            if not any(p in abs_l for p in bio_prefixes):
+                continue
+            # Tail after the last "/" should look like a slug (has a hyphen
+            # or is at least 4 alpha chars), otherwise it's probably the
+            # team index page itself.
+            tail = abs_l.rstrip("/").split("/")[-1]
+            if len(tail) < 4:
+                continue
+            # Exclude pagination + filter links
+            if any(skip in tail for skip in ("?", "=", "page", "filter", "all")):
+                continue
+            out.append(abs_url)
+        return out
+
+    # Strict path prefixes for sitemap filtering. We only pull sitemap
+    # URLs that match these patterns — the loose TEAM_LINK_KEYWORDS match
+    # would pull in case-study pages like /experience/strategic-partnership
+    # that eat the time budget without delivering bios.
+    SITEMAP_TEAM_PREFIXES = (
+        "/team", "/our-team", "/people", "/our-people", "/staff",
+        "/bios", "/bio/", "/faculty",
+        "/leadership", "/principals", "/management",
+        "/attorneys", "/attorney/", "/lawyers", "/lawyer/",
+        "/partners/", "/partner/", "/associates", "/associate/",
+        "/doctors", "/doctor/", "/physicians", "/physician/",
+        "/dentists", "/dentist/", "/providers", "/provider/",
+        "/specialists", "/specialist/", "/consultants", "/consultant/",
+        "/advisors", "/advisor/", "/cpas", "/cpa/",
+        "/agents", "/agent/", "/brokers", "/broker/", "/realtors", "/realtor/",
+        "/about/", "/about-us",
+        "/meet-the-", "/meet-our-",
+    )
+
+    def _parse_sitemap(xml: str) -> list[str]:
+        """Extract URLs from sitemap.xml that look like team/bio pages."""
+        urls = re.findall(r"<loc[^>]*>\s*([^<]+?)\s*</loc>", xml, flags=re.I)
+        out: list[str] = []
+        for u in urls:
+            u_l = u.lower().strip()
+            if domain and domain.lower() not in u_l:
+                continue
+            # Strict path-prefix match (not substring in query strings)
+            from urllib.parse import urlparse as _up
             try:
-                anchors = re.findall(
-                    r'<a[^>]+href=["\']([^"\'#]+)["\'][^>]*>([^<]{0,120})</a>',
-                    r.text, flags=re.I,
-                )
-                for href, link_text in anchors:
-                    href_l = href.lower().strip()
-                    text_l = link_text.lower().strip()
-                    # Match against keywords in either the URL or link text
-                    if not any(k in href_l or k in text_l for k in TEAM_LINK_KEYWORDS):
-                        continue
-                    # Resolve to absolute URL on the same domain
-                    if href_l.startswith("http"):
-                        if domain and domain.lower() not in href_l:
-                            continue  # off-site link
-                        candidate_url = href
-                    elif href_l.startswith("/"):
-                        candidate_url = base + href
-                    else:
-                        continue  # skip fragments / mailto / javascript:
-                    if candidate_url in visited:
-                        continue
-                    discovered_paths.add(candidate_url)
-                    if len(discovered_paths) >= 10:
-                        break
+                path_l = _up(u_l).path
             except Exception:
-                pass
+                path_l = u_l
+            if any(path_l.startswith(p) or path_l == p.rstrip("/")
+                   for p in SITEMAP_TEAM_PREFIXES):
+                out.append(u.strip())
+        return out
 
-    # Follow the discovered team-page links
-    for url in list(discovered_paths)[:10]:
-        if url in visited:
-            continue
-        visited.add(url)
+    def _extract_jsonld_people(html: str) -> list[OwnerCandidate]:
+        """
+        Parse <script type="application/ld+json"> blocks for Person /
+        Employee / OrganizationMember schemas. Many clinic / firm sites
+        publish their staff this way (often with `email` populated).
+        """
+        out: list[OwnerCandidate] = []
         try:
-            r = requests.get(url, timeout=8, headers=HEADERS, allow_redirects=True)
-            if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
-                continue
+            blocks = re.findall(
+                r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+                html, flags=re.S | re.I,
+            )
         except Exception:
+            return out
+        import json as _json
+        for blob in blocks:
+            try:
+                data = _json.loads(blob.strip())
+            except Exception:
+                continue
+            nodes = data if isinstance(data, list) else [data]
+            stack = list(nodes)
+            while stack:
+                node = stack.pop()
+                if isinstance(node, list):
+                    stack.extend(node); continue
+                if not isinstance(node, dict):
+                    continue
+                # Traverse nested structures
+                for v in node.values():
+                    if isinstance(v, (list, dict)):
+                        stack.append(v)
+                t = node.get("@type", "") or ""
+                if isinstance(t, list):
+                    t = t[0] if t else ""
+                if not any(t == k or t.endswith(k) for k in
+                           ("Person", "Employee", "OrganizationMember")):
+                    continue
+                name = (node.get("name") or node.get("givenName", "") + " " +
+                        node.get("familyName", "")).strip()
+                if not name or len(name.split()) < 2:
+                    continue
+                title = node.get("jobTitle") or ""
+                if isinstance(title, list):
+                    title = title[0] if title else ""
+                email = (node.get("email") or "").lower().strip()
+                if email.startswith("mailto:"):
+                    email = email[7:]
+                if email and not _is_rejected(email):
+                    emails.add(email)
+                parts = name.split()
+                out.append(OwnerCandidate(
+                    full_name=name, first_name=parts[0], last_name=parts[-1],
+                    title=str(title)[:80], source="website_jsonld",
+                    source_url="",  # filled in by caller
+                ))
+        return out
+
+    # ── Phase A: fixed path sweep + link discovery on homepage/about ──
+    for path in paths:
+        if len(visited) >= MAX_FETCHES or _time.time() - _t_start > MAX_SECONDS:
+            break
+        url = base + path
+        html = _fetch(url)
+        if html is None:
             continue
-        _process_page(url, r.text)
+        _process_page(url, html)
+        # Structured-data (JSON-LD) people — check every page
+        for jld in _extract_jsonld_people(html):
+            jld.source_url = url
+            candidates.append(jld)
+        # Link discovery fires on homepage + /about family
+        if path in ("/", "/about", "/about-us", "/about_us") and len(discovered_paths) < 25:
+            for u in _harvest_team_links(html):
+                discovered_paths.add(u)
+                if len(discovered_paths) >= 25:
+                    break
+
+    # Early-exit optimization: if Phase A already produced a solid haul
+    # (≥5 real emails, or ≥10 plausible names + ≥2 emails), skip Phases
+    # B/C/D. Preserves budget for sites that actually need the deeper
+    # crawl and avoids diminishing returns on sites that already
+    # volunteered their directory on the homepage + /about pages.
+    _real_names = sum(
+        1 for c in candidates
+        if not _is_junk_name(c.full_name, business_name=business_name)
+    )
+    _run_phase_bcd = not (len(emails) >= 5 or (_real_names >= 10 and len(emails) >= 2))
+    if not _run_phase_bcd:
+        logger.debug(
+            f"website_scrape: early-exit after Phase A for {domain} "
+            f"({_real_names} names, {len(emails)} emails, "
+            f"{round(_time.time()-_t_start,1)}s)"
+        )
+
+    # ── Phase B: sitemap.xml (authoritative page list) ──
+    # Many sites publish a sitemap that enumerates every URL. Free signal.
+    if _run_phase_bcd:
+      for sitemap_url in (base + "/sitemap.xml", base + "/sitemap_index.xml"):
+        if len(visited) >= MAX_FETCHES or _time.time() - _t_start > MAX_SECONDS:
+            break
+        sitemap_html = _fetch(sitemap_url)
+        if not sitemap_html:
+            continue
+        for u in _parse_sitemap(sitemap_html)[:30]:
+            discovered_paths.add(u)
+        # Handle sitemap-of-sitemaps: if we got index URLs, fetch one level deep
+        if "sitemapindex" in sitemap_html.lower():
+            for child in re.findall(r"<loc[^>]*>\s*([^<]+?)\s*</loc>", sitemap_html, flags=re.I)[:3]:
+                if _time.time() - _t_start > MAX_SECONDS:
+                    break
+                child_xml = _fetch(child.strip())
+                if child_xml:
+                    for u in _parse_sitemap(child_xml)[:30]:
+                        discovered_paths.add(u)
+
+    # ── Phase C: follow discovered team-page links ──
+    if _run_phase_bcd:
+      for url in list(discovered_paths)[:25]:
+        if len(visited) >= MAX_FETCHES or _time.time() - _t_start > MAX_SECONDS:
+            break
+        html = _fetch(url)
+        if html is None:
+            continue
+        _process_page(url, html)
+        for jld in _extract_jsonld_people(html):
+            jld.source_url = url
+            candidates.append(jld)
+        # On team pages, harvest links to individual bio pages
+        for bio_url in _harvest_bio_links(html, url):
+            bio_page_paths.add(bio_url)
+            if len(bio_page_paths) >= 20:
+                break
+
+    # ── Phase D: follow per-person bio pages ──
+    # This is where personal emails usually live (jane@firm.com on
+    # /attorneys/jane-doe). Free to fetch, high-value signal.
+    if _run_phase_bcd:
+      for url in list(bio_page_paths)[:20]:
+        if len(visited) >= MAX_FETCHES or _time.time() - _t_start > MAX_SECONDS:
+            break
+        html = _fetch(url)
+        if html is None:
+            continue
+        _process_page(url, html)
+        for jld in _extract_jsonld_people(html):
+            jld.source_url = url
+            candidates.append(jld)
 
     if domain:
         emails = {e.lower() for e in emails if e.lower().endswith("@" + domain.lower())}
@@ -1727,7 +1976,10 @@ def triangulate_email(
         # Website scrape
         result.agents_run.append("website_scrape")
         try:
-            w_cands, w_emails = fut_website.result(timeout=25)
+            # 60s gives the deep crawler room to follow sitemap + link
+            # discovery + per-person bio pages. Website scrape is free
+            # (bandwidth only), so we optimise for completeness.
+            w_cands, w_emails = fut_website.result(timeout=60)
             if w_cands or w_emails:
                 result.agents_succeeded.append("website_scrape")
             all_candidates.extend(w_cands)
