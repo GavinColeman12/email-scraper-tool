@@ -1,28 +1,70 @@
 """
-Lead quality scoring — thin compatibility wrapper around src.email_scoring.
+Lead quality scoring — v3 (2026-04-21).
 
-Historical layout (rating/reviews/website as top-level components) is gone.
-The identity-heavy scorer lives in `email_scoring.py`; this module maps the
-business-dict shape used by storage and UI pages into ScoringInputs and
-delegates.
+Transparent, identity-heavy formula:
 
-Public surface kept for backward compatibility:
+   Total = Email Verifiability (40) + Decision Maker (40)
+         + Review Count (15) + Google Rating (5)
+   Max 100.
+   Tiers: A=80+, B=65+, C=50+, D=35+, F<35
+
+Design rules (explicit product decisions):
+  - Email verifiability is the anchor. NB-valid on a DM email is the
+    strongest signal we can produce; NB-valid on a random scraped
+    person or NB-untested guess is worth noticeably less.
+  - Decision-maker identity is equally weighted. A confirmed DM
+    (name + executive title + last-name-matches-business + LinkedIn
+    source) is as valuable as a verified email — a verified email
+    for the wrong person is worth less than a verified email for the
+    right person.
+  - Website presence is NOT a component. Every business reaches this
+    scorer via the crawl path, so it's a given.
+  - Google rating and review count are selection signals, not outreach
+    quality. Combined they cap at 20 (was 35); rating drops to 5.
+
+Public surface preserved:
   - compute_lead_quality_score(business) -> {score, breakdown, tier}
-  - rank_businesses(list, top_n) -> list
+  - rank_businesses(list, top_n=None) -> list
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
-from .email_scoring import (
-    ScoringInputs,
-    score_email_candidate,
-    Specificity,
-)
+
+# ── Executive titles that signal a real decision maker ──────────────
+_EXECUTIVE_TITLES = {
+    "founder", "co-founder", "cofounder", "ceo", "chief executive",
+    "president", "owner", "principal", "partner", "managing partner",
+    "senior partner", "named partner", "proprietor",
+    "managing member", "managing director", "md",
+    "director", "executive director",
+    # Healthcare — the practice-owner is usually the DM
+    "dds", "dmd", "doctor", "dentist", "physician",
+}
+
+# Legal / professional-services partner titles that also count as DMs
+_SENIOR_ROLE_TITLES = {
+    "senior associate", "of counsel", "partner", "equity partner",
+}
 
 
-def _split_owner_name(full_name: str) -> tuple[str, str]:
-    parts = (full_name or "").strip().split()
+# ═════════════════════════════════════════════════════════════════════
+# Helpers
+# ═════════════════════════════════════════════════════════════════════
+
+def _parse_professional_ids(business: dict) -> dict:
+    raw = business.get("professional_ids") or {}
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw) or {}
+        except Exception:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _split_name(full: str) -> tuple[str, str]:
+    parts = (full or "").strip().split()
     if len(parts) >= 2:
         return parts[0], parts[-1]
     if len(parts) == 1:
@@ -30,175 +72,257 @@ def _split_owner_name(full_name: str) -> tuple[str, str]:
     return "", ""
 
 
-def _map_confidence_to_int(conf_str: str) -> int:
-    return {"high": 90, "medium": 70, "low": 40}.get(
-        (conf_str or "").lower(), 0
-    )
+def _is_executive_title(title: str) -> bool:
+    t = (title or "").lower().strip()
+    if not t:
+        return False
+    if t in _EXECUTIVE_TITLES:
+        return True
+    # Token-level check: "Managing Partner" → ("managing", "partner")
+    tokens = set(t.split())
+    for exec_t in _EXECUTIVE_TITLES | _SENIOR_ROLE_TITLES:
+        exec_tokens = set(exec_t.split())
+        if exec_tokens.issubset(tokens):
+            return True
+    return False
 
 
-def _derive_source_flags(email_source: str) -> tuple[bool, bool, bool, bool]:
-    """Return (was_scraped_direct, was_found_via_search,
-    was_generated_from_pattern, pattern_triangulated)."""
-    s = (email_source or "").lower()
-    scraped = any(k in s for k in (
-        "scraped", "mailto", "regex", "personal_email",
-        "team_page_decision_maker", "team_page_person",
-        "team_page_verified",
-    ))
-    search = any(k in s for k in ("linkedin", "google_search"))
-    # "constructed_from_pattern" or "constructed_from_linkedin" or
-    # "constructed_from_website_*" all count as pattern-generated.
-    pattern_generated = "constructed" in s or s in (
-        "detected_pattern", "first_last_fallback", "industry_prior", "",
-    )
-    triangulated = s == "detected_pattern" or "triangulated" in s
-    return scraped, search, pattern_generated, triangulated
+def _last_name_in_business(last: str, business_name: str) -> bool:
+    """True when the DM's last name appears as a word in the business name."""
+    if not last or not business_name:
+        return False
+    last_l = last.lower().strip()
+    if len(last_l) < 3:
+        return False  # too short to reliably match
+    biz_l = business_name.lower()
+    # Tokenize — avoid the "Martin" in "Martinez" false-positive
+    biz_tokens = set()
+    import re as _re
+    for tok in _re.findall(r"[a-z]+", biz_l):
+        biz_tokens.add(tok)
+    return last_l in biz_tokens
 
 
-def _nb_flags(email_status: str) -> tuple[bool, bool, bool, bool]:
-    """(nb_valid, nb_invalid, nb_catchall, nb_unknown)."""
-    st = (email_status or "").lower()
-    return (
-        st == "valid",
-        st in ("invalid", "disposable"),
-        st in ("risky", "catchall"),
-        st in ("", "unknown"),
-    )
-
-
-def _business_dict_to_inputs(business: dict) -> Optional[ScoringInputs]:
-    email = (
-        business.get("best_email")
-        or business.get("primary_email")
-        or business.get("email")
-        or ""
-    )
+def _find_picked_candidate(business: dict, prof: dict) -> Optional[dict]:
+    """Return the candidate_emails entry matching primary_email, if any."""
+    email = (business.get("primary_email") or "").lower()
     if not email:
         return None
+    for c in (prof.get("candidate_emails") or []):
+        if (c.get("email") or "").lower() == email:
+            return c
+    return None
 
-    owner_full = business.get("contact_name") or ""
-    owner_first, owner_last = _split_owner_name(owner_full)
-    owner_title = (business.get("contact_title") or "").strip()
-    owner_conf = _map_confidence_to_int(
-        business.get("contact_confidence") or business.get("owner_confidence") or ""
-    )
 
-    business_name = (business.get("business_name") or "").lower()
-    last_in_business = bool(
-        owner_last and owner_last.lower() in business_name
-    )
+def _email_status_fallback(business: dict) -> str:
+    """Get NB result from the email_status column when candidate data is missing."""
+    return (business.get("email_status") or "").lower().strip()
 
-    scraped, search, generated, triangulated = _derive_source_flags(
-        business.get("email_source") or ""
-    )
-    nb_valid, nb_invalid, nb_catchall, nb_unknown = _nb_flags(
-        business.get("email_status") or ""
-    )
 
-    # Triangulation applies PER-EMAIL. A scraped info@ at a domain that
-    # has a triangulated pattern for SOMEONE ELSE'S email doesn't inherit
-    # that proof. So: only credit triangulation if this specific email's
-    # local-part is consistent with the detected pattern for this owner.
-    # professional_ids is stored in SQLite as a JSON string; decode it if
-    # we got the raw column value instead of a freshly-built dict.
-    prof_raw = business.get("professional_ids")
-    if isinstance(prof_raw, str):
-        try:
-            import json as _json
-            prof = _json.loads(prof_raw) or {}
-        except Exception:
-            prof = {}
-    else:
-        prof = prof_raw or {}
-    detected = (prof or {}).get("detected_pattern") or {}
-    local = email.split("@", 1)[0].lower() if "@" in email else ""
-    email_matches_pattern = False
-    if detected and owner_first and owner_last and local:
-        f, l = owner_first.lower(), owner_last.lower()
-        pat_to_local = {
-            "first.last": f"{f}.{l}",
-            "firstlast": f"{f}{l}",
-            "flast": f"{f[0]}{l}" if f else "",
-            "f.last": f"{f[0]}.{l}" if f else "",
-            "first": f,
-            "last": l,
-            "drlast": f"dr{l}",
-            "dr.last": f"dr.{l}",
-            "last.first": f"{l}.{f}",
-            "lastf": f"{l}{f[0]}" if f else "",
-        }
-        expected = pat_to_local.get(detected.get("pattern", "").lower(), "")
-        email_matches_pattern = bool(expected) and local == expected
+# ═════════════════════════════════════════════════════════════════════
+# Component scorers
+# ═════════════════════════════════════════════════════════════════════
 
-    pattern_confidence = int(detected.get("confidence") or 0) if email_matches_pattern else 0
-    pattern_evidence_count = (
-        len(detected.get("evidence_emails") or [])
-        if email_matches_pattern else 0
-    )
+def _score_email_verifiability(business: dict, prof: dict) -> int:
+    """
+    Max 40.
 
-    return ScoringInputs(
-        email=email,
-        owner_first=owner_first,
-        owner_last=owner_last,
-        owner_confidence=owner_conf,
-        owner_title=owner_title,
-        was_scraped_direct=scraped,
-        was_found_via_search=search,
-        was_generated_from_pattern=generated,
-        pattern_triangulated=email_matches_pattern,
-        pattern_confidence=pattern_confidence,
-        pattern_evidence_count=pattern_evidence_count,
-        nb_valid=nb_valid,
-        nb_invalid=nb_invalid,
-        nb_catchall=nb_catchall,
-        nb_unknown=nb_unknown,
-        smtp_valid=bool(business.get("smtp_valid")),
-        smtp_catchall=bool(business.get("smtp_catchall")),
-        is_catchall_domain=bool(
-            business.get("is_catchall_domain")
-            or business.get("email_status") in ("catchall", "risky")
-        ),
-        owner_last_name_in_business=last_in_business,
-    )
+    Bucket × NB result matrix. Bucket comes from volume_mode's
+    candidate_emails[].bucket; if missing (triangulation rows don't
+    have it), we fall back to a simple heuristic based on email_source.
+    """
+    email = (business.get("primary_email") or "").strip()
+    if not email:
+        return 0
 
+    picked = _find_picked_candidate(business, prof)
+    nb_result = ""
+    bucket = ""
+    if picked:
+        nb_result = (picked.get("nb_result") or "").lower()
+        bucket = (picked.get("bucket") or "").lower()
+    if not nb_result:
+        nb_result = _email_status_fallback(business)
+
+    if nb_result == "invalid":
+        return 0
+
+    # Infer bucket from email_source for non-volume-mode rows
+    if not bucket:
+        src = (business.get("email_source") or "").lower()
+        if "triangulated" in src or "detected_pattern" in src:
+            bucket = "b"
+        elif "scraped" in src and "decision maker" in src:
+            bucket = "a"
+        elif "scraped" in src:
+            bucket = "c"
+        elif "industry prior" in src or "industry_prior" in src:
+            bucket = "d"
+        elif "fallback" in src:
+            bucket = "e"
+        else:
+            bucket = "c"  # conservative default
+
+    # Scoring matrix — rewards DM-matching buckets + NB verification
+    matrix = {
+        # (bucket, nb_result) -> points
+        ("a", "valid"):    40,  # scraped DM email, verified
+        ("b", "valid"):    38,  # triangulated DM pattern, verified
+        ("d", "valid"):    36,  # industry-prior DM, verified — still a win
+        ("c", "valid"):    30,  # scraped non-DM person, verified
+        ("e", "valid"):    26,  # universal fallback, verified
+        ("a", "catchall"): 24,
+        ("b", "catchall"): 22,
+        ("d", "catchall"): 20,
+        ("c", "catchall"): 18,
+        ("e", "catchall"): 15,
+        ("a", "unknown"):  20,
+        ("b", "unknown"):  18,
+        ("d", "unknown"):  16,
+        ("c", "unknown"):  14,
+        ("e", "unknown"):  12,
+        ("a", ""):         18,  # not tested
+        ("b", ""):         16,
+        ("d", ""):         12,  # untested industry-prior = weakest
+        ("c", ""):         14,
+        ("e", ""):         10,
+    }
+    return matrix.get((bucket, nb_result), 10)
+
+
+def _score_decision_maker(business: dict, prof: dict) -> int:
+    """
+    Max 40. Additive signals, capped.
+
+      +10  DM has first + last name
+      +10  Title is executive (Founder, CEO, Owner, Managing Partner, ...)
+      +10  Last name overlaps the business name
+      +10  Source includes LinkedIn (professional identity confirmed)
+      + 5  Source is multi-agent (cross-verified, e.g. "website + linkedin")
+    """
+    contact_name = (business.get("contact_name") or "").strip()
+    if not contact_name:
+        return 0
+
+    first, last = _split_name(contact_name)
+    title = business.get("contact_title") or ""
+    business_name = business.get("business_name") or ""
+    dm_info = (prof.get("decision_maker") or {}) if prof else {}
+    source = (dm_info.get("source") or "").lower()
+
+    score = 0
+    # Base: we have a plausible name
+    if first and last:
+        score += 10
+    elif first:
+        score += 4  # partial credit for first-name-only
+
+    # Title qualifies as executive
+    if _is_executive_title(title):
+        score += 10
+
+    # Last name matches business name (strong DM signal for SMBs —
+    # Weaver → Weaver Law, Gunnell → Gunnell Law, Ludlum → Ludlum Law)
+    if _last_name_in_business(last, business_name):
+        score += 10
+
+    # LinkedIn source — confirmed professional identity
+    if "linkedin" in source:
+        score += 10
+
+    # Multi-source cross-verification
+    if "+" in source or source.count(",") > 0:
+        score += 5
+
+    return min(score, 40)
+
+
+def _score_review_count(business: dict) -> int:
+    """Max 15. Social-proof signal from Google Maps."""
+    n = int(business.get("review_count") or 0)
+    if n >= 500:
+        return 15
+    if n >= 200:
+        return 13
+    if n >= 100:
+        return 11
+    if n >= 50:
+        return 8
+    if n >= 10:
+        return 5
+    return 0
+
+
+def _score_google_rating(business: dict) -> int:
+    """Max 5. Rating-quality signal (de-weighted — 5% of total)."""
+    try:
+        r = float(business.get("rating") or 0)
+    except (TypeError, ValueError):
+        return 0
+    if r >= 4.8:
+        return 5
+    if r >= 4.5:
+        return 4
+    if r >= 4.0:
+        return 3
+    if r >= 3.5:
+        return 2
+    return 0
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Public API
+# ═════════════════════════════════════════════════════════════════════
 
 def compute_lead_quality_score(business: dict) -> dict:
     """
     Return {"score": int, "breakdown": {...}, "tier": "A".."F"}.
-    Identity-heavy: rating, review count, and website presence NOT factors
-    (we pre-filter to sites with websites; rating/reviews are selection
-    criteria, not outreach-quality signals).
+
+    Transparent formula:
+      email_verifiability (40) + decision_maker (40)
+      + review_count (15) + google_rating (5) = max 100
     """
+    # SKIP confidence = hard reject regardless of other signals
     if (business.get("confidence") or "").lower() == "skip":
         return {
             "score": 0,
-            "breakdown": {
-                "source_evidence": 0, "triangulation": 0,
-                "verification": 0, "owner_context": 0, "synergy": 0,
-            },
             "tier": "F",
+            "breakdown": {
+                "email_verifiability": 0,
+                "decision_maker": 0,
+                "review_count": 0,
+                "google_rating": 0,
+            },
         }
 
-    inputs = _business_dict_to_inputs(business)
-    if inputs is None:
-        return {
-            "score": 0,
-            "breakdown": {
-                "source_evidence": 0, "triangulation": 0,
-                "verification": 0, "owner_context": 0, "synergy": 0,
-            },
-            "tier": "F",
-        }
+    prof = _parse_professional_ids(business)
 
-    scored = score_email_candidate(inputs)
+    ev = _score_email_verifiability(business, prof)
+    dm = _score_decision_maker(business, prof)
+    rc = _score_review_count(business)
+    gr = _score_google_rating(business)
+    total = ev + dm + rc + gr
+
+    if total >= 80:
+        tier = "A"
+    elif total >= 65:
+        tier = "B"
+    elif total >= 50:
+        tier = "C"
+    elif total >= 35:
+        tier = "D"
+    else:
+        tier = "F"
+
     return {
-        "score": scored.score,
-        "breakdown": scored.components,
-        "tier": scored.grade,
-        "specificity": scored.specificity.value,
-        "is_catchall": scored.is_catchall,
-        "is_triangulated": scored.is_triangulated,
-        "requires_manual_review": scored.requires_manual_review,
+        "score": total,
+        "tier": tier,
+        "breakdown": {
+            "email_verifiability": ev,
+            "decision_maker": dm,
+            "review_count": rc,
+            "google_rating": gr,
+        },
     }
 
 
@@ -212,3 +336,11 @@ def rank_businesses(businesses: list, top_n: Optional[int] = None) -> list:
     if top_n:
         return ranked[:top_n]
     return ranked
+
+
+# ── Backward-compat shim for decision_log.py ──
+# The old scorer returned a rich structure that decision_log.py imports.
+# Provide a dummy _business_dict_to_inputs that returns None — the
+# scoring block in decision_log will skip the deep-path branch.
+def _business_dict_to_inputs(business: dict):
+    return None

@@ -485,15 +485,16 @@ else:
 # ── Score breakdown explainer ──
 with st.expander("ℹ️ How lead scores are calculated"):
     st.markdown("""
-    Each business gets a 0-100 score combining five signals:
+    Each business gets a 0-100 score combining four signals. Email
+    verifiability and decision-maker identity dominate — they're 80% of
+    the score. Google rating and review count are tiebreakers.
 
-    | Component | Max | What it measures |
+    | Component | Max | What it rewards |
     |---|---|---|
-    | **Email confidence** | 40 | HIGH=40, MEDIUM=25, LOW=10 (+ verification bonus) |
-    | **Google rating** | 20 | 4.8+=20, 4.5+=17, 4.0+=13, 3.5+=8 |
-    | **Review count** | 15 | 500+=15, 200+=13, 100+=11, 50+=8 |
-    | **Website present** | 10 | Real domain=10, social-only=4 |
-    | **Decision maker** | 15 | Name+title=15, name only=10, title only=4 |
+    | **Email verifiability** | 40 | NB-valid scraped DM = 40 · NB-valid triangulated pattern = 38 · NB-valid industry-prior guess = 36 · NB-valid scraped non-DM = 30 · catchall/unknown/untested = 10-24 · NB-invalid = 0 |
+    | **Decision maker** | 40 | +10 name present · +10 executive title (Founder, CEO, Owner, Managing Partner, …) · +10 last name matches business name (e.g. Weaver → Weaver Law) · +10 LinkedIn-sourced · +5 cross-verified across agents |
+    | **Review count** | 15 | 500+=15 · 200+=13 · 100+=11 · 50+=8 · 10+=5 |
+    | **Google rating** | 5 | 4.8+=5 · 4.5+=4 · 4.0+=3 · 3.5+=2 |
 
     **Tiers:** A=80+, B=65+, C=50+, D=35+, F<35
     """)
