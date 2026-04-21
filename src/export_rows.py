@@ -63,6 +63,10 @@ def verify_badge(biz: dict) -> str:
     Demotes 🟢 HIGH → 🟡 MED when the row is actually unsafe (catch-all or
     triangulation flagged it below threshold), so operators don't ship
     unverified sends.
+
+    Volume mode adds a distinct 🟣 REVIEW tier for NB-unknown rows — cold
+    outreach should NOT auto-send these. The operator filters them out
+    or manually inspects before adding to a send batch.
     """
     conf = (biz.get("confidence") or "").lower()
     src = (biz.get("email_source") or "").lower()
@@ -73,6 +77,8 @@ def verify_badge(biz: dict) -> str:
         return "🟢 VERIFIED" if not is_unsafe else "🟡 MED (catch-all)"
     if conf == "high":
         return "🟢 HIGH" if not is_unsafe else "🟡 MED (catch-all)"
+    if conf == "review":
+        return "🟣 REVIEW (NB unknown)"
     if conf == "medium" and "unverified_with_signal" in src:
         return "🟡 MED (unverified)"
     if conf == "medium":

@@ -340,8 +340,11 @@ with f2:
 with f3:
     conf_filter = st.multiselect(
         "Email confidence",
-        ["high", "medium", "low"],
-        default=["high", "medium"],
+        ["high", "review", "medium", "low"],
+        default=["high"],  # default to verified-only — user explicitly opts
+                           # into review/medium/low for wider nets
+        help="high=🟢 NB-valid · review=🟣 NB-unknown (manual check first) "
+             "· medium=🟡 catchall · low=🔴 industry-prior guess",
     )
 with f4:
     min_rating = st.number_input("Min Google rating", 0.0, 5.0, 0.0, step=0.1)
@@ -497,4 +500,11 @@ with st.expander("ℹ️ How lead scores are calculated"):
     | **Google rating** | 5 | 4.8+=5 · 4.5+=4 · 4.0+=3 · 3.5+=2 |
 
     **Tiers:** A=80+, B=65+, C=50+, D=35+, F<35
+
+    **Confidence tiers (volume mode):**
+    - 🟢 **high / volume_verified** — NB returned VALID. Deliverable confirmed. **Safe to send.**
+    - 🟣 **review / volume_review** — NB returned UNKNOWN (server refused or out of credits). **Do NOT auto-send.** Re-verify manually or top up NB credits.
+    - 🟡 **medium / volume_scraped** — catchall domain (deliverable-looking but mailbox may not exist).
+    - 🔴 **low / volume_guess** — industry-prior guess, not NB-verified.
+    - ⚫ **volume_empty** — no plausible email found.
     """)

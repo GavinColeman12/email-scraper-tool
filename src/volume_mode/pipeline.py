@@ -32,7 +32,7 @@ from src.volume_mode.priors import (
 )
 from src.volume_mode.ranking import (
     Candidate, pick_best, confidence_tier,
-    TIER_VERIFIED, TIER_SCRAPED, TIER_GUESS, TIER_EMPTY,
+    TIER_VERIFIED, TIER_SCRAPED, TIER_REVIEW, TIER_GUESS, TIER_EMPTY,
 )
 from src.volume_mode.stopwords import is_generic, email_is_generic
 from src.volume_mode.wayback import fetch_wayback_pages
@@ -223,6 +223,59 @@ def scrape_volume(
             if c.full_name.lower() == hint_name.lower():
                 dm = c
                 break
+
+    # P3 override: for SMB domains like martin-law.com, wooleylawoffice.com,
+    # dahlbergomeara.com — the last name embedded in the domain IS almost
+    # always the founder. This beats LinkedIn ranking when it disagrees.
+    # e.g. "Bill Brady" from LinkedIn vs "Joe Martin" from website — if
+    # the domain is martin-law.com, Joe Martin wins.
+    domain_core = (domain or "").lower()
+    # Strip the TLD and split on non-alpha so "martin-law.com" →
+    # segments {"martin", "law", "com"}; "dahlbergomeara.com" stays
+    # as one blob "dahlbergomeara".
+    import re as _re
+    domain_no_tld = _re.sub(r"\.(com|org|net|co|law|us|io|biz|info).*$",
+                             "", domain_core)
+    domain_segments = set(_re.split(r"[^a-z]+", domain_no_tld))
+    domain_segments.discard("")
+    domain_segments.discard("law")
+    domain_segments.discard("firm")
+    domain_segments.discard("office")
+    domain_segments.discard("offices")
+    domain_segments.discard("group")
+    domain_segments.discard("legal")
+    domain_segments.discard("attorneys")
+    domain_segments.discard("attorney")
+
+    def _domain_contains_lastname(cand) -> bool:
+        ln = (cand.last_name or "").lower()
+        if len(ln) < 4:  # too short to reliably match
+            return False
+        # Exact segment match: domain_segments contain "martin" for Joe Martin
+        if ln in domain_segments:
+            return True
+        # Substring in the continuous domain name (catches
+        # "dahlbergomeara.com" with last_name="Dahlberg" or "OMeara")
+        if ln in domain_no_tld:
+            return True
+        return False
+
+    if ranked and domain_core:
+        # If any provider's last name appears in the domain, that provider
+        # is the founder — override whatever DM selection we had above.
+        domain_founders = [c for c in ranked if _domain_contains_lastname(c)]
+        if domain_founders:
+            # Prefer the first one in synthesis order (already ranked by
+            # signal strength). Skip this override if the current DM is
+            # ALREADY a domain-founder (no need to change).
+            current_is_founder = dm and _domain_contains_lastname(dm)
+            if not current_is_founder:
+                dm = domain_founders[0]
+                result.evidence_trail["dm_override"] = (
+                    f"domain_lastname: picked {dm.full_name} because "
+                    f"'{dm.last_name}' appears in domain {domain_core}"
+                )
+
     if dm is None:
         dm = ranked[0] if ranked else None
 
@@ -454,7 +507,7 @@ def scrape_volume(
             result.agents_succeeded.append("neverbounce")
 
     # ── Phase 8: Pick best_email via ranking walker ──
-    winner = pick_best(candidates)
+    winner = pick_best(candidates, business_name=business_name)
     tier = confidence_tier(winner)
     result.confidence_tier = tier
 
@@ -546,6 +599,10 @@ def volume_result_to_scrape_result(result: VolumeResult, business: dict) -> dict
         conf_bucket = "high"
     elif tier == TIER_SCRAPED:
         conf_bucket = "medium"
+    elif tier == TIER_REVIEW:
+        # NB-unknown — human must review before send. Maps to a distinct
+        # CSV badge via src/export_rows.verify_badge().
+        conf_bucket = "review"
     elif tier == TIER_GUESS:
         conf_bucket = "low"
     else:

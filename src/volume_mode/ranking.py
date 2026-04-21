@@ -24,9 +24,10 @@ from src.volume_mode.stopwords import is_generic
 
 
 # Confidence tier labels — map to the CSV Badge via shared export logic
-TIER_VERIFIED = "volume_verified"   # 🟢  bucket a/b/c + NB-valid
-TIER_SCRAPED = "volume_scraped"    # 🟡  bucket a/b/c + NB-catchall/unknown
-TIER_GUESS = "volume_guess"        # 🔴  bucket d/e, not NB-verified
+TIER_VERIFIED = "volume_verified"   # 🟢  NB-valid (deliverable confirmed)
+TIER_SCRAPED = "volume_scraped"    # 🟡  scraped + NB-catchall (deliverable-looking but domain accepts everything)
+TIER_REVIEW = "volume_review"      # 🟣  NB-unknown on a scraped/triangulated mailbox — cold outreach should NOT send without human review (NB couldn't verify, either quota or server-refused)
+TIER_GUESS = "volume_guess"        # 🔴  industry-prior or fallback guess, not NB-verified — low confidence, send only as volume spray
 TIER_EMPTY = "volume_empty"        # ⚫  nothing usable
 
 
@@ -60,8 +61,19 @@ BUCKET_ORDER = ("a", "b", "c", "d", "e")
 # goal is to reach the DM, not any person at the company.
 DM_BUCKETS = ("a", "b", "d")
 
+# Priority walk when no NB-valid exists. DM-match buckets (a, b, d) come
+# BEFORE non-DM scraped (c) — reversing the old a→b→c→d→e order.
+# Rationale: a scraped non-DM email (bucket c, e.g. bbrady@martin-law.com
+# when the DM is Joe Martin) should NOT beat a constructed DM email
+# (bucket d, joe.martin@martin-law.com) even when neither is NB-verified.
+# The scraped non-DM is valuable as pattern evidence, not as the
+# primary send target.
+DM_PRIORITY_WALK = ("a", "b", "d", "c", "e")
 
-def pick_best(candidates: list[Candidate]) -> Optional[Candidate]:
+
+def pick_best(
+    candidates: list[Candidate], *, business_name: str = "",
+) -> Optional[Candidate]:
     """
     Pick the best candidate with a two-tier priority:
 
@@ -69,17 +81,22 @@ def pick_best(candidates: list[Candidate]) -> Optional[Candidate]:
         among DM-match buckets (a, b, d) → a > b > d
         else among scraped-other buckets (c, e) → c > e
 
-    Tier 2 — nothing NB-valid, fall back to the original bucket walk:
-        a → b → c → d → e
-        Within bucket, NB-unknown > NB-catchall > NB-invalid > not-tested
+    Tier 2 — nothing NB-valid, walk DM_PRIORITY_WALK (a → b → d → c → e):
+        DM-match buckets come before scraped-other.
+        Within bucket, NB-unknown > NB-catchall > NB-invalid > not-tested.
 
-    Generic-inbox emails are NEVER eligible.
-    Bucket d/e candidates that came back NB-invalid are skipped (we have
-    proof they bounce — don't send).
+    Generic-inbox emails are NEVER eligible. When `business_name` is
+    passed, firm-name-as-local patterns (e.g. hlawfirm@hildebrandlaw.com,
+    martinlaw@martin-law.com) are also rejected as generic.
+
+    Bucket d/e NB-invalid = confirmed bounce, skip (don't send).
     """
-    # Pre-filter: drop generics
+    # Pre-filter: drop generics (including firm-name aliases when we have context)
     eligible = [c for c in candidates
-                if not is_generic(c.email.split("@", 1)[0])]
+                if not is_generic(
+                    c.email.split("@", 1)[0],
+                    business_name=business_name,
+                )]
     if not eligible:
         return None
 
@@ -92,8 +109,8 @@ def pick_best(candidates: list[Candidate]) -> Optional[Candidate]:
         nb_valid.sort(key=_nb_valid_rank)
         return nb_valid[0]
 
-    # Tier 2: walk buckets a→e. Inside each bucket pick the best by NB rank.
-    for bucket in BUCKET_ORDER:
+    # Tier 2: walk DM-match first (a → b → d) then scraped-other (c → e).
+    for bucket in DM_PRIORITY_WALK:
         pool = [c for c in eligible if c.bucket == bucket]
         if not pool:
             continue
@@ -110,19 +127,26 @@ def confidence_tier(winner: Optional[Candidate]) -> str:
     """
     Map the winning candidate to a tier the shared Badge logic understands.
 
-    volume_verified: any bucket (including d — industry-prior guess)
-                     where NeverBounce returned VALID. When bucket D's
-                     pattern-built email is NB-valid, we've PROVEN the
-                     pattern — that's not a guess anymore.
-    volume_scraped:  bucket a/b/c with NB-catchall/unknown/untested
-    volume_guess:    bucket d/e NOT NB-verified (budget exhausted or
-                     candidate never fit the NB walk)
-    volume_empty:    nothing plausible
+    volume_verified: NB returned VALID. Safe to send.
+    volume_review:   NB returned UNKNOWN. Cold outreach MUST NOT send —
+                     NB couldn't verify (account out of credits, server
+                     refused, or hit an edge case). Operator reviews
+                     the row manually before the email goes out.
+    volume_scraped:  bucket a/b/c with NB-catchall (deliverable-looking
+                     but the mailbox may not exist on a catchall domain)
+                     or NB-untested after budget exhaustion.
+    volume_guess:    bucket d/e, not NB-verified — industry-prior guess
+                     or universal fallback.
+    volume_empty:    nothing plausible.
     """
     if winner is None:
         return TIER_EMPTY
     if winner.nb_result == "valid":
         return TIER_VERIFIED
+    # NB-unknown specifically — we asked NB, it couldn't say. For cold
+    # outreach at scale that's a bounce risk we shouldn't auto-send into.
+    if winner.nb_result == "unknown":
+        return TIER_REVIEW
     if winner.bucket in ("a", "b", "c"):
         return TIER_SCRAPED
     return TIER_GUESS

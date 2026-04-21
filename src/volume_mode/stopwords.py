@@ -63,14 +63,49 @@ GENERIC_LOCAL_PARTS = {
     # More news / content aliases
     "blog", "podcast", "editorial", "editor", "editors", "writer", "writers",
     "content", "social", "community-manager",
+    # Legal practice-area / role inboxes — attorney@, divorce@, cases@
+    # are all shared mailboxes that auto-route to whoever handles intake,
+    # not to the founder/DM
+    "attorney", "attorneys", "lawyer", "lawyers", "legal", "law",
+    "cases", "case", "claim", "claims", "litigation", "litigator",
+    "divorce", "custody", "criminal", "dui", "dwi", "accident", "injury",
+    "personalinjury", "pi", "pilaw", "estateplanning", "estate",
+    "probate", "immigration", "bankruptcy", "employment",
+    "workerscomp", "workcomp", "ssd", "disability",
+    "intake", "intakes", "newclient", "newclients", "consultation",
+    "consultations", "consult", "consults",
+    # Medical / dental practice-area inboxes
+    "dentalpractice", "medicalpractice", "practice", "clinic",
+    "dr", "drs", "dentists", "doctors",
+    "ortho", "endo", "perio", "oral", "surgery", "cosmetic", "implants",
+    "braces", "invisalign", "whitening", "cleaning", "cleanings",
+    "extraction", "extractions", "pediatric", "emergency",
 }
 
 
-def is_generic(local_part: str) -> bool:
+# Practice-area + role tokens that, when found INSIDE a longer local
+# part (not exact match), still flag as a shared inbox. These catch
+# compound names like "divorceattorney@firm.com", "pilawyer@firm.com",
+# "intakemanager@firm.com". Kept tighter than GENERIC_LOCAL_PARTS because
+# substring matching has higher false-positive risk.
+PRACTICE_AREA_SUBSTRINGS = (
+    "lawfirm", "lawoffice", "lawoffices", "firmadmin",
+    "divorceattorney", "divorcelawyer", "piattorney", "pilawyer",
+    "personalinjury", "carcrash", "caraccident",
+    "intakemanager", "intakespecialist", "caseworker",
+    "practicemanager", "officemanager", "officeadmin",
+)
+
+
+def is_generic(local_part: str, *, business_name: str = "") -> bool:
     """
     Return True if the email local part is a generic / shared inbox
-    keyword, a numeric-only string, or 2 characters or shorter
-    (prefixes like "ny@" are always non-person).
+    keyword, a numeric-only string, 2 chars or shorter, contains a
+    practice-area substring, or matches the business-name tokens.
+
+    Accepts an optional `business_name` so we can dynamically reject
+    firm-name-as-local patterns like `hlawfirm@hildebrandlaw.com` or
+    `martinlaw@martin-law.com` (both are shared inboxes, not people).
 
     Intentionally strict: if we're wrong and reject a real person named
     "Hi" or "Sales", the cost is one lost lead; if we're wrong and
@@ -95,11 +130,44 @@ def is_generic(local_part: str) -> bool:
     stripped = _re.sub(r"[\d_\-]+$", "", lp)
     if stripped and stripped in GENERIC_LOCAL_PARTS:
         return True
+    # Practice-area compound patterns
+    for sub in PRACTICE_AREA_SUBSTRINGS:
+        if sub in lp:
+            return True
+    # Firm-name-as-local: if the local part contains a substantive
+    # business-name token (≥4 chars that aren't filler), it's almost
+    # certainly a shared "firm@" alias. E.g.:
+    #   martin-law.com → local "martinlaw" is generic
+    #   hildebrand → local "hildebrandlaw" is generic
+    #   weaver-law.com → local "weaverlaw" is generic
+    # We keep bare-lastname-in-local OK because it can be a real
+    # person's email (e.g. weaver@weaver-law.com could be the founder
+    # Roger Weaver — the scraped-DM-match check handles that case).
+    if business_name:
+        filler = {"the", "and", "llc", "inc", "co", "corp", "group",
+                  "of", "firm", "law", "clinic", "practice", "center",
+                  "labs", "lab", "pllc", "pc", "llp", "office", "offices",
+                  "attorney", "attorneys", "lawyer", "lawyers", "a"}
+        import re as _re2
+        biz_tokens = [t.lower() for t in _re2.findall(r"[A-Za-z]+", business_name)
+                      if len(t) >= 4 and t.lower() not in filler]
+        # Require BOTH a firm-name token AND a generic modifier token
+        # (law, firm, office, etc.) in the local — so bare last name
+        # `weaver@` stays OK but `weaverlaw@` or `hildebrandfirm@` is
+        # classified generic.
+        modifier_tokens = {"law", "firm", "office", "offices", "legal",
+                            "attorney", "attorneys", "lawyers",
+                            "clinic", "practice", "group", "team",
+                            "associates"}
+        has_biz_token = any(t in lp for t in biz_tokens)
+        has_modifier = any(m in lp for m in modifier_tokens)
+        if has_biz_token and has_modifier:
+            return True
     return False
 
 
-def email_is_generic(email: str) -> bool:
+def email_is_generic(email: str, *, business_name: str = "") -> bool:
     """Extract local part from email and call is_generic()."""
     if not email or "@" not in email:
         return True
-    return is_generic(email.split("@", 1)[0])
+    return is_generic(email.split("@", 1)[0], business_name=business_name)

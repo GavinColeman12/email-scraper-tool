@@ -54,6 +54,50 @@ def test_email_is_generic_passthrough():
     assert email_is_generic("")
 
 
+# ── P2: Practice-area + firm-name rejection ──
+
+def test_p2_legal_practice_area_locals_rejected():
+    for w in ("attorney", "lawyer", "divorce", "legal", "cases", "intake",
+              "personalinjury", "dui", "probate", "estateplanning"):
+        assert is_generic(w), f"{w} should be rejected as generic"
+
+
+def test_p2_medical_practice_area_locals_rejected():
+    for w in ("clinic", "practice", "cleanings", "extraction", "whitening",
+              "cosmetic", "implants", "pediatric", "emergency"):
+        assert is_generic(w), f"{w} should be rejected as generic"
+
+
+def test_p2_compound_practice_area_rejected():
+    """Substring match — divorceattorney@, pilawyer@, intakemanager@."""
+    for w in ("divorceattorney", "pilawyer", "piattorney",
+              "intakemanager", "officeadmin", "practicemanager"):
+        assert is_generic(w), f"{w} should be rejected as generic"
+
+
+def test_p2_firm_name_plus_modifier_in_local_rejected():
+    """
+    hlawfirm@hildebrandlaw.com, martinlaw@martin-law.com,
+    weaverlaw@weaver-law.com — firm-name-token + law/firm/office
+    modifier = shared alias, not a person.
+    """
+    # Needs business_name context to detect firm-name token
+    assert is_generic("martinlaw", business_name="Martin Law Offices")
+    assert is_generic("weaverlawfirm", business_name="Weaver Law Offices")
+    assert is_generic("hildebrandlaw", business_name="Hildebrand Law Firm")
+    # Bare last name as local is OK (Roger Weaver → weaver@ could be real)
+    assert not is_generic("weaver", business_name="Weaver Law Offices")
+    # First-last is obviously OK
+    assert not is_generic("roger.weaver", business_name="Weaver Law Offices")
+
+
+def test_p2_no_business_name_falls_back_to_old_behavior():
+    """Backward compat: callers that don't pass business_name get the
+    same behavior as before (only static blacklist + length checks)."""
+    assert not is_generic("weaverlaw")  # no context, don't reject
+    assert is_generic("info")  # still rejected via static list
+
+
 # ── priors ──
 
 def test_priors_have_no_bare_first_pattern():
@@ -215,6 +259,55 @@ def test_confidence_tier_mapping():
     assert confidence_tier(scraped_c) == TIER_SCRAPED
     assert confidence_tier(guess_d) == TIER_GUESS
     assert confidence_tier(None) == TIER_EMPTY
+
+
+# ── P1: DM-match walks before bucket C in tier 2 ──
+
+def test_p1_constructed_dm_wins_over_scraped_non_dm_when_neither_verified():
+    """
+    The canonical bug: bbrady@martin-law.com (bucket c, random partner)
+    was winning over joe.martin@martin-law.com (bucket d, constructed
+    DM). Bucket D should win when neither is NB-valid because it's
+    the actual decision maker, not a random associate.
+    """
+    from src.volume_mode.ranking import TIER_GUESS
+    cands = [
+        Candidate(email="bbrady@martin-law.com", bucket="c", nb_result=None),
+        Candidate(email="joe.martin@martin-law.com", bucket="d", nb_result=None),
+    ]
+    winner = pick_best(cands)
+    assert winner.email == "joe.martin@martin-law.com"
+
+
+def test_p1_triangulated_dm_still_wins_over_scraped_non_dm():
+    """Bucket B (triangulated DM from pattern evidence) beats bucket C."""
+    cands = [
+        Candidate(email="bbrady@martin-law.com", bucket="c", nb_result=None),
+        Candidate(email="jmartin@martin-law.com", bucket="b", nb_result=None),
+    ]
+    assert pick_best(cands).email == "jmartin@martin-law.com"
+
+
+# ── P4: NB-unknown produces review tier, not verified ──
+
+def test_p4_nb_unknown_gives_review_tier_not_verified():
+    """
+    NB returned UNKNOWN = we asked, NB couldn't say. Cold outreach must
+    not auto-send into that — operator reviews manually. This is the
+    new volume_review tier.
+    """
+    from src.volume_mode.ranking import TIER_REVIEW
+    unknown_scraped = Candidate(email="x@y", bucket="a", nb_result="unknown")
+    assert confidence_tier(unknown_scraped) == TIER_REVIEW
+    unknown_pattern = Candidate(email="x@y", bucket="b", nb_result="unknown")
+    assert confidence_tier(unknown_pattern) == TIER_REVIEW
+    # Bucket d/e NB-unknown stays volume_guess (no proof the pattern
+    # works; it's still a guess, just one we asked about)
+    unknown_prior = Candidate(email="x@y", bucket="d", nb_result="unknown")
+    assert confidence_tier(unknown_prior) == TIER_REVIEW
+    # Catchall is distinct from unknown — stays volume_scraped
+    catchall_scraped = Candidate(email="x@y", bucket="a", nb_result="catchall")
+    assert confidence_tier(catchall_scraped) == TIER_SCRAPED
 
 
 if __name__ == "__main__":
