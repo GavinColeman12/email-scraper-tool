@@ -357,15 +357,46 @@ def search_businesses(query: str, location: str = "",
     return all_results[:max_results]
 
 
-def estimate_cost(max_results: int) -> float:
-    """Estimate SearchApi credit cost for a given search size.
-
-    Upper bound — the scraper may use synonym variants if the base query
-    doesn't return enough results, adding ~1 extra API call per variant.
+def estimate_cost(max_results: int, query: str = "") -> dict:
     """
-    pages = max(1, (max_results + 19) // 20)
-    # Add ~2 extra calls to budget for synonym variants on larger searches
-    if max_results > 40:
-        pages += 2
-    # SearchApi charges ~1 credit per call, typically ~$0.005 per credit
-    return pages * 0.005
+    Estimate SearchApi cost + API-call count for a given search.
+
+    Returns {"avg_usd": float, "max_usd": float, "avg_calls": int,
+             "max_calls": int, "variants": int}.
+
+    The previous version under-estimated by ~5× because it used a flat
+    pages = max_results/20 + 2 and ignored synonym fan-out. In practice
+    Google Maps returns ~15-25 unique results per query per location
+    for common verticals, so hitting 100 results usually means running
+    5+ synonym variants — each paginated, each deduped.
+    """
+    pages_per_variant = max(1, min(10, (max_results + 19) // 20))
+
+    # How many synonym variants will actually fire?
+    if query:
+        try:
+            variants = _query_variants(query)
+            n_variants = len(variants)
+        except Exception:
+            n_variants = 1
+    else:
+        n_variants = 1
+
+    # Average-case: variants short-circuit once we hit max_results.
+    # Assume each variant contributes ~20 new results after dedup; once
+    # we've accumulated max_results, the loop exits early.
+    avg_variants_fired = min(n_variants, max(1, (max_results + 19) // 20))
+    avg_calls = avg_variants_fired * pages_per_variant
+
+    # Worst-case: every variant runs full pagination because dupes/thin
+    # results force us to keep querying.
+    max_calls = n_variants * pages_per_variant
+
+    # SearchApi: ~$0.005 per credit/call
+    return {
+        "avg_usd": round(avg_calls * 0.005, 2),
+        "max_usd": round(max_calls * 0.005, 2),
+        "avg_calls": avg_calls,
+        "max_calls": max_calls,
+        "variants": n_variants,
+    }

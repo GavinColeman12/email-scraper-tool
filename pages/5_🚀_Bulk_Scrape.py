@@ -123,27 +123,61 @@ with mode_col2:
     )
 
 if mode == "verified":
-    cost = len(pending) * 0.0015  # ~$0.30 per 200 = $0.0015 per biz
-    st.caption(f"💰 Verified mode estimated cost: ~${cost:.2f} for {len(pending)} businesses "
-                "(Haiku fires on ~30% of businesses; SMTP verification is free)")
-elif mode == "deep":
-    cost = len(pending) * 0.02
-    st.caption(f"💰 Deep mode estimated cost: ~${cost:.2f} for {len(pending)} businesses")
-elif mode == "triangulation":
-    cost = len(pending) * 0.055
+    # Cost: Haiku fires ~30% of biz ($0.001 × 0.30 = $0.0003) + SMTP probes (free)
+    # Avg: $0.0003/biz · max (Haiku every biz): $0.002/biz
+    cost_avg = len(pending) * 0.0005
+    cost_max = len(pending) * 0.002
     st.caption(
-        f"💰 Triangulation mode estimated cost: ~${cost:.2f} for {len(pending)} businesses "
-        "(~$0.05-0.06/biz: 2 SearchApi calls + 1 NeverBounce verify per business). "
-        "Only the top candidate is NeverBounced — SMTP probes are free."
+        f"💰 **Verified mode:** ~${cost_avg:.2f} typical · ${cost_max:.2f} worst-case "
+        f"for {len(pending)} businesses. Haiku name-filter fires on ~30% of biz; "
+        "SMTP verification is free."
+    )
+elif mode == "deep":
+    # 4 Sonnet agents per biz (~$0.015-0.02 each) + SMTP + Haiku
+    cost_avg = len(pending) * 0.015
+    cost_max = len(pending) * 0.025
+    st.caption(
+        f"💰 **Deep mode:** ~${cost_avg:.2f} typical · ${cost_max:.2f} worst-case "
+        f"for {len(pending)} businesses (Sonnet-powered 4-agent research)."
+    )
+elif mode == "triangulation":
+    # Triangulation per biz:
+    #   Phase 1: combined owner+press search ($0.005) + optional LinkedIn ($0.005, ~40%)
+    #   Phase 3B: colleague emails ($0.005 × up to 3, ~20% of biz)
+    #   Phase 6: NeverBounce (up to 4 × $0.003 = $0.012, avg ~$0.006)
+    #   Phase 1.5: Haiku classifier (~$0.002 cached, ~$0.002 fresh)
+    # Avg: ~$0.020-0.025/biz · Worst case: ~$0.050/biz
+    cost_avg = len(pending) * 0.025
+    cost_max = len(pending) * 0.050
+    st.caption(
+        f"💰 **Triangulation mode:** ~${cost_avg:.2f} typical · ${cost_max:.2f} worst-case "
+        f"for {len(pending)} businesses (~${cost_avg/max(1,len(pending))*1000:.0f}/1000 typical). "
+        "Full 7-phase pipeline: combined owner search + press + LinkedIn fallback + "
+        "colleague email harvest + NeverBounce walk. SMTP probes + WHOIS + NPI are free."
     )
 elif mode == "volume":
-    cost = len(pending) * 0.016  # avg ~$0.016/biz after early-exits
+    # Cost composition per biz:
+    #   Crawl + Wayback + Haiku name-filter: free (bandwidth + $0.001 cached)
+    #   LinkedIn fallback: $0.005, fires on ~30% of biz → $0.0015 avg
+    #   NeverBounce: up to 4 calls × $0.003 = $0.012 max,
+    #                ~2 calls avg = $0.006
+    #   Budget cap: $0.025/biz hard ceiling
+    # Typical: $0.008-0.010/biz  ·  Worst case: $0.025/biz
+    avg_per_biz = 0.009
+    max_per_biz = 0.025
+    cost_avg = len(pending) * avg_per_biz
+    cost_max = len(pending) * max_per_biz
     st.caption(
-        f"💰 Volume mode estimated cost: ~${cost:.2f} for {len(pending)} businesses "
-        "(~$0.01-0.025/biz: deep crawl + Wayback are free; LinkedIn fires only when no DM found; "
-        "NeverBounce verifies the top 1-3 scraped/pattern-matched candidates). "
+        f"💰 **Volume mode estimated cost:** ~${cost_avg:.2f} typical "
+        f"(${cost_max:.2f} hard cap) for {len(pending)} businesses "
+        f"· ${avg_per_biz*1000:.0f}/1000 typical · "
+        f"${max_per_biz*1000:.0f}/1000 worst-case.\n\n"
+        "**Per-biz breakdown:** crawl + Wayback + Haiku classifier = ~$0 · "
+        "LinkedIn fallback (~$0.005, fires when crawl finds no DM, ~30% of biz) · "
+        "NeverBounce (~$0.003 × 2-4 calls = $0.006-0.012 typical). "
+        "Hard per-biz cap: $0.025.\n\n"
         "**Generic inboxes — info@, contact@, hello@, smile@, etc. — are never picked.** "
-        "Decision makers first; industry prior (law → firstname.lastname, dental → first.last) "
+        "Decision makers first; industry prior (law → first.last, dental → first.last) "
         "is the last resort."
     )
 

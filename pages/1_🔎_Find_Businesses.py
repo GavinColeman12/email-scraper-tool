@@ -37,11 +37,20 @@ with st.form("search_form"):
              "Lets you run the same query repeatedly and always see fresh results."
     )
 
-    est = estimate_cost(max_results)
-    st.caption(
-        f"💰 Estimated cost: ~${est:.2f} SearchApi credits "
-        f"({(max_results + 19) // 20} API calls)"
-    )
+    est = estimate_cost(max_results, query=query)
+    if est["variants"] > 1:
+        st.caption(
+            f"💰 **Estimated cost:** ~${est['avg_usd']:.2f} typical, "
+            f"${est['max_usd']:.2f} worst-case "
+            f"(~{est['avg_calls']}-{est['max_calls']} API calls · "
+            f"{est['variants']} query variants will fan out: the scraper tries "
+            f"'{query}', then synonyms until it hits {max_results} unique results)"
+        )
+    else:
+        st.caption(
+            f"💰 **Estimated cost:** ~${est['avg_usd']:.2f} "
+            f"({est['avg_calls']} API calls — no synonym expansion for this query)"
+        )
 
     submitted = st.form_submit_button("🔍 Search Google Maps", type="primary")
 
