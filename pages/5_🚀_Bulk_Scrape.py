@@ -93,6 +93,12 @@ scraped_no_email = [
 with_email = [b for b in businesses if b.get("primary_email")]
 no_website = [b for b in businesses if not b.get("website")]
 
+# Backwards-compat alias — the ranking section below uses `scraped` to
+# mean "businesses with a primary_email that can be ranked as leads".
+# Renamed the counter variable above for UX clarity but kept this alias
+# so the rest of the page keeps working.
+scraped = with_email
+
 # "pending" for the scrape button = only biz that actually need a run.
 # Re-scraping a scraped_no_email biz produces the same result unless
 # the logic / cache has changed, so we don't auto-include them — but
