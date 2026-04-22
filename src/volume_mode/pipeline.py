@@ -416,44 +416,79 @@ def scrape_volume(
         "bankruptcy", "probate", "immigration",
     }
 
+    # Titles that strongly indicate the DM is a real founder/owner even
+    # when their name overlaps with the business name. "David Star" is
+    # a real person at "David Star Construction"; "Franklin Barbecue" is
+    # not a real person at "Franklin Barbecue". The distinguishing
+    # signal is whether the website-scrape extracted a credential like
+    # "Founder" or "Owner" for them — a business name sitting on a
+    # restaurant page has no such title attached.
+    _FOUNDER_CREDENTIALS = {
+        "founder", "co-founder", "cofounder", "owner", "co-owner",
+        "ceo", "president", "principal", "managing partner",
+        "managing director", "md", "chairman", "chairwoman", "chair",
+        "proprietor",
+    }
+
     def _dm_is_business_name_artifact() -> bool:
         if not dm:
-            return True
-        dm_tokens = set((dm.full_name or "").lower().split())
-        biz_tokens = set((business_name or "").lower().split())
-        # Drop common filler words that show up in business names
-        for t in ("the", "and", "llc", "inc", "co", "corp", "group",
-                  "of", "firm", "clinic", "practice", "center", "lab", "labs"):
-            dm_tokens.discard(t); biz_tokens.discard(t)
-        if not dm_tokens or not biz_tokens:
-            return False
-        overlap = dm_tokens & biz_tokens
-        # If the DM name is ENTIRELY made of business-name tokens, it's junk
-        if overlap and overlap == dm_tokens:
             return True
         # If the DM first OR last name is a known role-word, refuse to
         # build a guessed email — these are almost always extraction
         # noise ("Program Notion", "Service Experts", "Marketing
-        # Director") not real people.
+        # Director", "Bonding Chao") not real people.
         if dm_first in _ROLE_WORD_FIRSTS or dm_last in _ROLE_WORD_FIRSTS:
+            return True
+
+        # If the DM has a real founder/owner credential, TRUST them even
+        # when their name overlaps with the business name. Covers:
+        #   "David Star" (Founder) at David Star Construction      ← real
+        #   "Andrew Hale" (Owner)  at Hales Construction LLC       ← real
+        #   "Franklin Barbecue"    at Franklin Barbecue (no cred)  ← artifact
+        dm_cred = (getattr(dm, "title", "") or "").lower().strip()
+        if any(c in dm_cred for c in _FOUNDER_CREDENTIALS):
+            return False
+
+        dm_tokens = set((dm.full_name or "").lower().split())
+        biz_tokens = set((business_name or "").lower().split())
+        # Drop common filler words that show up in business names
+        for t in ("the", "and", "llc", "inc", "co", "corp", "group",
+                  "of", "firm", "clinic", "practice", "center", "lab", "labs",
+                  "law", "legal", "attorneys", "construction", "contracting",
+                  "building", "builders", "services", "company", "companies"):
+            dm_tokens.discard(t); biz_tokens.discard(t)
+        if not dm_tokens or not biz_tokens:
+            return False
+        overlap = dm_tokens & biz_tokens
+        # If the DM name is ENTIRELY made of business-name tokens AND
+        # has no founder credential, it's likely a parsing artifact
+        # (Franklin Barbecue, Pregnancy Discrimination, etc.)
+        if overlap and overlap == dm_tokens:
             return True
         return False
 
     if dm and dm_first and dm_last and not _dm_is_business_name_artifact():
         industry_raw = (business.get("business_type") or "").lower()
         priors = get_priors(industry_raw)
-        if priors:
-            primary_pattern = priors[0]
-            d_email = _build_email(primary_pattern, dm_first, dm_last, domain)
-            if d_email and not is_generic(d_email.split("@", 1)[0]):
-                # Only add if not already in higher bucket
-                if not any(c.email == d_email for c in candidates):
-                    vertical = normalize_vertical(industry_raw) or "generic"
-                    candidates.append(Candidate(
-                        email=d_email, bucket="d",
-                        pattern=primary_pattern,
-                        source=f"industry prior '{primary_pattern}' ({vertical})",
-                    ))
+        vertical = normalize_vertical(industry_raw) or "generic"
+        # Build up to 3 bucket-D variants from the industry priors.
+        # When the primary pattern NB-invalids, the walker falls through
+        # to the secondary and tertiary. Without this, a single bounced
+        # guess used to zero out the whole row — search_39 lost 22/24
+        # construction businesses that way.
+        for prior_pattern in priors[:3]:
+            d_email = _build_email(prior_pattern, dm_first, dm_last, domain)
+            if not d_email:
+                continue
+            if is_generic(d_email.split("@", 1)[0], business_name=business_name):
+                continue
+            if any(c.email == d_email for c in candidates):
+                continue  # already in a higher bucket
+            candidates.append(Candidate(
+                email=d_email, bucket="d",
+                pattern=prior_pattern,
+                source=f"industry prior '{prior_pattern}' ({vertical})",
+            ))
 
     # Bucket E: universal first.last@ fallback (only if no DM was found
     # AND somehow we still have a name hint — rare)

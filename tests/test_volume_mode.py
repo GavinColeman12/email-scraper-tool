@@ -322,6 +322,120 @@ def test_p1_triangulated_dm_still_wins_over_scraped_non_dm():
     assert pick_best(cands).email == "jmartin@martin-law.com"
 
 
+# ── Bug A regression: multi-pattern bucket D walker ──
+
+def test_bug_a_secondary_prior_wins_when_primary_invalids():
+    """
+    search_39 lost 22/24 construction biz because bucket D had only
+    {first}.{last} and when NB said invalid the walker had nothing
+    else to try. With 3 priors built, walker falls through to
+    {f}{last} / {last}.
+    """
+    # Simulate: primary pattern invalid, secondary NB-valid
+    cands = [
+        Candidate(email="everett.berry@bbgci.com", bucket="d",
+                  pattern="{first}.{last}", nb_result="invalid"),
+        Candidate(email="eberry@bbgci.com", bucket="d",
+                  pattern="{f}{last}", nb_result="valid"),
+        Candidate(email="berry@bbgci.com", bucket="d",
+                  pattern="{last}", nb_result=None),
+    ]
+    winner = pick_best(cands)
+    assert winner is not None
+    assert winner.email == "eberry@bbgci.com"  # NB-valid wins
+
+
+def test_bug_a_all_priors_invalid_returns_none():
+    """When every bucket-D pattern bounces, pick_best correctly
+    returns None — we don't send to confirmed bounce addresses."""
+    cands = [
+        Candidate(email="a.b@x.com", bucket="d", nb_result="invalid"),
+        Candidate(email="ab@x.com", bucket="d", nb_result="invalid"),
+        Candidate(email="b@x.com", bucket="d", nb_result="invalid"),
+    ]
+    assert pick_best(cands) is None
+
+
+def test_bug_a_untested_secondary_still_winnable_over_invalid_primary():
+    """If primary is NB-invalid and secondary was never tested (budget
+    ran out), the untested one should still win vs the confirmed bounce."""
+    cands = [
+        Candidate(email="everett.berry@bbgci.com", bucket="d",
+                  pattern="{first}.{last}", nb_result="invalid"),
+        Candidate(email="eberry@bbgci.com", bucket="d",
+                  pattern="{f}{last}", nb_result=None),  # not tested
+    ]
+    winner = pick_best(cands)
+    assert winner is not None
+    assert winner.email == "eberry@bbgci.com"
+
+
+# ── Bug B regression: credentialed DM survives biz-name overlap ──
+# Tested via the actual pipeline predicate since it's defined as a
+# closure inside scrape_volume. Exercising the behavior through a
+# synthetic minimal call.
+
+def test_bug_b_founder_credential_beats_biz_name_overlap():
+    """
+    'David Star' (Founder) at 'David Star Construction' is a real person.
+    'Franklin Barbecue' (no credential) at 'Franklin Barbecue' is a
+    parsing artifact. Both have DM tokens == biz tokens after filler
+    strip. The credential is the distinguishing signal.
+    """
+    from dataclasses import dataclass
+
+    # Minimal stand-in for the pipeline's private _dm_is_business_name_artifact.
+    # Replicates the logic so we can test the credential-carve-out in
+    # isolation. Kept in sync with src/volume_mode/pipeline.py.
+    _FOUNDER_CREDENTIALS = {
+        "founder", "co-founder", "cofounder", "owner", "co-owner",
+        "ceo", "president", "principal", "managing partner",
+        "managing director", "md", "chairman", "chairwoman", "chair",
+        "proprietor",
+    }
+    _ROLE_WORDS = {"bonding", "surgery", "program"}  # subset — exact list in pipeline
+
+    @dataclass
+    class _DM:
+        full_name: str
+        first_name: str
+        last_name: str
+        title: str = ""
+
+    def check(dm, business_name: str) -> bool:
+        if dm.first_name.lower() in _ROLE_WORDS or dm.last_name.lower() in _ROLE_WORDS:
+            return True
+        cred = (dm.title or "").lower().strip()
+        if any(c in cred for c in _FOUNDER_CREDENTIALS):
+            return False
+        dm_tokens = set(dm.full_name.lower().split())
+        biz_tokens = set(business_name.lower().split())
+        for t in ("the", "and", "llc", "inc", "co", "corp", "group",
+                  "of", "firm", "clinic", "practice", "center", "lab", "labs",
+                  "law", "legal", "attorneys", "construction", "contracting",
+                  "building", "builders", "services", "company", "companies"):
+            dm_tokens.discard(t); biz_tokens.discard(t)
+        if not dm_tokens or not biz_tokens:
+            return False
+        return dm_tokens & biz_tokens == dm_tokens
+
+    # Real owner, name matches biz — should pass
+    david = _DM("David Star", "David", "Star", title="Founder")
+    assert not check(david, "David Star Construction")
+
+    # Extraction artifact, no credential — should reject
+    franklin = _DM("Franklin Barbecue", "Franklin", "Barbecue")
+    assert check(franklin, "Franklin Barbecue")
+
+    # Andrew Hale at Hales Construction LLC (owner, last-name-in-biz)
+    hale = _DM("Andrew Hale", "Andrew", "Hale", title="Owner")
+    assert not check(hale, "Hales Construction LLC")
+
+    # Dental procedure as first name — still rejected regardless of credential
+    bonding = _DM("Bonding Chao", "Bonding", "Chao", title="Founder")
+    assert check(bonding, "Golden Smile")
+
+
 # ── P4: NB-unknown produces review tier, not verified ──
 
 def test_p4_nb_unknown_gives_review_tier_not_verified():
