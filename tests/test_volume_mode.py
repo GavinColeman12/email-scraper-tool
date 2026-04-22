@@ -100,23 +100,35 @@ def test_p2_no_business_name_falls_back_to_old_behavior():
 
 # ── Post-search-38 regression guards ──
 
-def test_info_prefix_with_location_suffix_rejected():
+def test_info_substring_always_rejected():
     """
-    search_38 leaked infosp@ and infocyl@ as bucket C picks because
-    exact-match 'info' wasn't in the local. Prefix+short-suffix is
-    now caught — these are location-specific shared inboxes, not
-    personal mailboxes.
+    User's rule: any local part containing 'info' is demoted. 'Info'
+    appears in effectively zero real person names, so we treat it as
+    an absolute shared-inbox signal. Covers infosp, smithinfo, drinfo,
+    practiceinfo, info-team, info-sp, info123, etc.
     """
-    assert is_generic("infosp")      # info + St Paul
-    assert is_generic("infocyl")     # info + city code
-    assert is_generic("salesmn")     # sales + MN
-    assert is_generic("contactnyc")  # contact + NYC
-    assert is_generic("supportla")   # support + LA
-    # But longer prefixed words stay — real "infomatic" / "helloworld" are fine
-    assert not is_generic("infomatic")   # 4+ suffix chars
-    assert not is_generic("helloworld")  # 5+ suffix chars
-    # Classic generic forms still work
+    # Exact + prefix variants we already caught
     assert is_generic("info")
+    assert is_generic("infosp")
+    assert is_generic("infocyl")
+    # NEW: substring anywhere in the local part
+    assert is_generic("smithinfo")
+    assert is_generic("drinfo")
+    assert is_generic("practiceinfo")
+    assert is_generic("info-team")
+    assert is_generic("info-sp")
+    assert is_generic("2024info")
+    assert is_generic("infomatic")   # previously survived; now correctly rejected
+
+
+def test_contact_prefix_with_location_suffix_rejected():
+    """Non-'info' prefix+short-suffix variants stay rejected."""
+    assert is_generic("contactnyc")  # contact + NYC
+    assert is_generic("salesmn")     # sales + MN
+    assert is_generic("supportla")   # support + LA
+    # Longer suffix stays — real "helloworld" is fine
+    assert not is_generic("helloworld")
+    # Classic generic forms still work
     assert is_generic("contact")
 
 

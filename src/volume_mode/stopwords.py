@@ -124,15 +124,21 @@ def is_generic(local_part: str, *, business_name: str = "") -> bool:
     for prefix in ("test", "demo", "sample", "example", "temp", "placeholder"):
         if lp.startswith(prefix):
             return True
+    # "info" is such a strong shared-inbox indicator that ANY local
+    # part containing it is demoted — infosp, smithinfo, drinfo,
+    # practiceinfo, 2024info, info-team, et al. "Info" appears in
+    # essentially zero real person names, so the false-positive risk
+    # is near zero and the downside (accidentally cold-mailing a
+    # shared inbox) is real.
+    if "info" in lp:
+        return True
     # Shared-inbox prefix + short location/variant suffix —
-    #   infosp  = info + St Paul
-    #   infocyl = info + [city]
-    #   salesmn = sales + MN
     #   contactnyc = contact + NYC
+    #   salesmn    = sales + MN
     # Rule: local starts with a shared-inbox keyword AND the remainder
-    # is ≤ 4 characters (so real names like "infomatic" 4+ chars stay
+    # is ≤ 4 characters (so real names like "helloworld" 5+ chars stay
     # unaffected, but location-variant aliases are rejected).
-    for prefix in ("info", "contact", "hello", "sales", "support",
+    for prefix in ("contact", "hello", "sales", "support",
                    "admin", "office", "team", "help", "service",
                    "reception", "billing", "intake"):
         if lp.startswith(prefix) and 0 < len(lp) - len(prefix) <= 4:
