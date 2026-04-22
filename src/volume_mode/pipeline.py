@@ -389,6 +389,7 @@ def scrape_volume(
     # Director", etc. If the DM's first OR last name is in this set,
     # we refuse to build an industry-prior email for them.
     _ROLE_WORD_FIRSTS = {
+        # Business / corporate roles
         "program", "product", "project", "customer", "client", "account",
         "service", "services", "sales", "marketing", "support", "team",
         "staff", "admin", "office", "meeting", "event", "events", "contact",
@@ -399,6 +400,20 @@ def scrape_volume(
         "chief", "director", "manager", "partner", "founder", "president",
         "owner", "attorney", "lawyer", "doctor", "dentist", "practitioner",
         "principal",
+        # Dental / medical procedures leaking in as "first name"
+        # (e.g. "Bonding Chao" on Golden Smile — "Bonding" is a
+        # dental procedure label from the services page)
+        "bonding", "crown", "crowns", "veneer", "veneers", "filling",
+        "fillings", "extraction", "extractions", "cleaning", "cleanings",
+        "whitening", "braces", "invisalign", "implant", "implants",
+        "root", "canal", "periodontal", "cosmetic", "pediatric",
+        "emergency", "exam", "exams", "checkup", "checkups",
+        "xray", "x-ray", "consult", "consultation", "consultations",
+        "treatment", "treatments", "procedure", "procedures",
+        "surgery", "surgeries", "orthodontics", "orthodontic",
+        # Legal practice areas as "first name"
+        "divorce", "custody", "injury", "accident", "dui", "dwi",
+        "bankruptcy", "probate", "immigration",
     }
 
     def _dm_is_business_name_artifact() -> bool:

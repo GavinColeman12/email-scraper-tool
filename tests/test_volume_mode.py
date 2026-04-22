@@ -98,6 +98,28 @@ def test_p2_no_business_name_falls_back_to_old_behavior():
     assert is_generic("info")  # still rejected via static list
 
 
+# ── Post-search-38 regression guards ──
+
+def test_info_prefix_with_location_suffix_rejected():
+    """
+    search_38 leaked infosp@ and infocyl@ as bucket C picks because
+    exact-match 'info' wasn't in the local. Prefix+short-suffix is
+    now caught — these are location-specific shared inboxes, not
+    personal mailboxes.
+    """
+    assert is_generic("infosp")      # info + St Paul
+    assert is_generic("infocyl")     # info + city code
+    assert is_generic("salesmn")     # sales + MN
+    assert is_generic("contactnyc")  # contact + NYC
+    assert is_generic("supportla")   # support + LA
+    # But longer prefixed words stay — real "infomatic" / "helloworld" are fine
+    assert not is_generic("infomatic")   # 4+ suffix chars
+    assert not is_generic("helloworld")  # 5+ suffix chars
+    # Classic generic forms still work
+    assert is_generic("info")
+    assert is_generic("contact")
+
+
 # ── priors ──
 
 def test_priors_have_no_bare_first_pattern():

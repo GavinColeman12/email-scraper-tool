@@ -124,6 +124,19 @@ def is_generic(local_part: str, *, business_name: str = "") -> bool:
     for prefix in ("test", "demo", "sample", "example", "temp", "placeholder"):
         if lp.startswith(prefix):
             return True
+    # Shared-inbox prefix + short location/variant suffix —
+    #   infosp  = info + St Paul
+    #   infocyl = info + [city]
+    #   salesmn = sales + MN
+    #   contactnyc = contact + NYC
+    # Rule: local starts with a shared-inbox keyword AND the remainder
+    # is ≤ 4 characters (so real names like "infomatic" 4+ chars stay
+    # unaffected, but location-variant aliases are rejected).
+    for prefix in ("info", "contact", "hello", "sales", "support",
+                   "admin", "office", "team", "help", "service",
+                   "reception", "billing", "intake"):
+        if lp.startswith(prefix) and 0 < len(lp) - len(prefix) <= 4:
+            return True
     # Compound generic (e.g. "info123", "contact-us-today", "team-sf")
     # Strip trailing digits / common separators and re-check.
     import re as _re
