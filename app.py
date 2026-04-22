@@ -56,7 +56,9 @@ if searches:
                 f"**#{s['id']} — {s['query']}**  \n"
                 f"_{s.get('location', '') or '(no location)'} · "
                 f"{s.get('max_results', '?')} max results · "
-                f"Created {(s.get('created_at') or '')[:10]}_"
+                # str() coerces the datetime Postgres returns into the ISO
+                # string SQLite returns — both slice to 'YYYY-MM-DD'.
+                f"Created {str(s.get('created_at') or '')[:10]}_"
             )
             cols[1].metric("Found", s.get("business_count", 0))
             cols[2].metric("With email", s.get("with_email", 0))
