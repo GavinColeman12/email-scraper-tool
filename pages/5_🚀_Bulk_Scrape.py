@@ -76,14 +76,57 @@ search_id = st.selectbox("Search", options=list(labels.keys()),
                           format_func=lambda k: labels[k])
 
 businesses = storage.list_businesses(search_id=search_id)
-pending = [b for b in businesses if not b.get("primary_email") and b.get("website")]
-scraped = [b for b in businesses if b.get("primary_email")]
+# Three distinct states (previously collapsed into "Pending"):
+#   not_scraped     — never processed (scraped_at is NULL). These are
+#                     the only ones that actually need a scrape run.
+#   scraped_no_email — processed, pipeline exhausted without finding a
+#                     deliverable email (DM rejected all NB probes, or
+#                     every bucket-D pattern bounced, etc.). NOT stuck
+#                     and NOT retryable — the domain genuinely doesn't
+#                     accept mail at any pattern we tried.
+#   with_email      — has primary_email.
+not_scraped = [b for b in businesses if not b.get("scraped_at") and b.get("website")]
+scraped_no_email = [
+    b for b in businesses
+    if b.get("scraped_at") and not b.get("primary_email") and b.get("website")
+]
+with_email = [b for b in businesses if b.get("primary_email")]
+no_website = [b for b in businesses if not b.get("website")]
 
-c1, c2, c3, c4 = st.columns(4)
+# "pending" for the scrape button = only biz that actually need a run.
+# Re-scraping a scraped_no_email biz produces the same result unless
+# the logic / cache has changed, so we don't auto-include them — but
+# we surface a toggle below to let the operator force a retry.
+pending = not_scraped
+
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Total", len(businesses))
-c2.metric("Pending", len(pending))
-c3.metric("Scraped", len(scraped))
-c4.metric("No website", len([b for b in businesses if not b.get("website")]))
+c2.metric("Not scraped yet", len(not_scraped),
+          help="Businesses with a website that haven't been processed yet. "
+               "These are what the Scrape button will run.")
+c3.metric("With email", len(with_email),
+          help="Businesses where the pipeline produced a deliverable email.")
+c4.metric("No email found", len(scraped_no_email),
+          help="Processed, but pipeline exhausted all patterns without finding "
+               "a deliverable address (typical for domains with strict "
+               "mailbox enforcement). Not 'stuck' — these are done. "
+               "Enable 'Retry exhausted' below to re-scrape them after a logic upgrade.")
+c5.metric("No website", len(no_website),
+          help="Businesses Google Maps returned without a website. Can't be scraped.")
+
+# Offer retry for the exhausted cases — useful after pipeline upgrades
+# when the new logic might find something the old one missed.
+if scraped_no_email:
+    retry_exhausted = st.toggle(
+        f"🔁 Retry {len(scraped_no_email)} 'no email found' businesses "
+        f"(re-scrape with current logic — may recover some after pipeline fixes)",
+        value=False,
+        help="Use this after landing a pipeline improvement to give previously-"
+             "exhausted businesses another chance. Cost: same as a fresh scrape "
+             "for each, but most of the crawl data is cached so it's fast.",
+    )
+    if retry_exhausted:
+        pending = not_scraped + scraped_no_email
 
 # ── Check active job for this search ──
 active = [
