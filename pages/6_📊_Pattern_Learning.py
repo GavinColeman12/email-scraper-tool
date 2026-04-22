@@ -100,8 +100,8 @@ with tab_bounces:
             # token.json is wired into gmail_sender.py here.
             # Import is conditional so the rest of the page works without Gmail.
             import sys as _sys, os as _os
-            audit_tool_src = "/Users/gavincoleman/Downloads/reputation-audit-tool"
-            if _os.path.isdir(audit_tool_src) and audit_tool_src not in _sys.path:
+            audit_tool_src = _os.environ.get("AUDIT_TOOL_SRC", "")
+            if audit_tool_src and _os.path.isdir(audit_tool_src) and audit_tool_src not in _sys.path:
                 _sys.path.insert(0, audit_tool_src)
             try:
                 from src.gmail_sender import _get_credentials  # from sister project
