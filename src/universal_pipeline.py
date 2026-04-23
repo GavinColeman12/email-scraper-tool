@@ -1053,6 +1053,28 @@ def _agent_website_scrape(
                 out.append(base + href)
         return out
 
+    def _harvest_pdf_links(html: str, base_url: str) -> list[str]:
+        """Absolute URLs to .pdf assets linked from this page. Bounded
+        to the business's own domain so we don't follow off-site PDFs."""
+        out: list[str] = []
+        try:
+            hrefs = re.findall(r'<a[^>]+href=["\']([^"\'#]+\.pdf(?:\?[^"\']*)?)["\']',
+                                html, flags=re.I)
+        except Exception:
+            return out
+        for h in hrefs:
+            h_l = h.lower().strip()
+            if h_l.startswith("http"):
+                if domain and domain.lower() not in h_l:
+                    continue
+                out.append(h)
+            elif h_l.startswith("/"):
+                out.append(base + h)
+            else:
+                out.append(base + "/" + h.lstrip("./"))
+        return out
+
+
     def _harvest_bio_links(html: str, source_url: str) -> list[str]:
         """
         Second-layer discovery: on a team page, look for links that appear
@@ -1206,6 +1228,9 @@ def _agent_website_scrape(
                 ))
         return out
 
+    # PDF URLs we discover during crawling — fetched & scraped in Phase E.
+    pdf_urls: set[str] = set()
+
     # ── Phase A: fixed path sweep + link discovery on homepage/about ──
     for path in paths:
         if len(visited) >= MAX_FETCHES or _time.time() - _t_start > MAX_SECONDS:
@@ -1219,6 +1244,10 @@ def _agent_website_scrape(
         for jld in _extract_jsonld_people(html):
             jld.source_url = url
             candidates.append(jld)
+        # Harvest PDFs linked from every page (firm brochures, CVs,
+        # engagement letters often have staff emails in footers).
+        for pu in _harvest_pdf_links(html, url):
+            pdf_urls.add(pu)
         # Link discovery fires on homepage + /about family
         if path in ("/", "/about", "/about-us", "/about_us") and len(discovered_paths) < 25:
             for u in _harvest_team_links(html):
@@ -1296,6 +1325,24 @@ def _agent_website_scrape(
         for jld in _extract_jsonld_people(html):
             jld.source_url = url
             candidates.append(jld)
+        for pu in _harvest_pdf_links(html, url):
+            pdf_urls.add(pu)
+
+    # ── Phase E: PDF scraping (firm brochures, CVs, engagement letters) ──
+    # Emails in PDFs are often missed by HTML regex. Bounded to 5 PDFs,
+    # 6 MB each, same-domain only.
+    if pdf_urls and _time.time() - _t_start < MAX_SECONDS:
+        try:
+            from src.pdf_scraper import harvest_pdf_emails
+            pdf_result = harvest_pdf_emails(
+                sorted(pdf_urls)[:5], domain=domain,
+                max_pdfs=5, timeout_s=8,
+            )
+            for e in pdf_result.get("emails", []):
+                if not _is_rejected(e):
+                    emails.add(e)
+        except Exception as e:
+            logger.debug(f"pdf_harvest failed: {e}")
 
     if domain:
         emails = {e.lower() for e in emails if e.lower().endswith("@" + domain.lower())}
@@ -1617,9 +1664,20 @@ def _synthesise_owners(
         primary = max(group, key=lambda x: _title_weight(x.title))
         sources = list({c.source for c in group if c.source})
         titles = [c.title for c in group if c.title]
+        # Cross-page corroboration — count distinct source_urls the
+        # name appeared on. A name on 3+ pages/sources is much more
+        # likely to be real than a name extracted once from a footer
+        # snippet. Scales the base score.
+        distinct_urls = len({c.source_url for c in group if c.source_url})
+        corroboration_bonus = 0
+        if distinct_urls >= 3:
+            corroboration_bonus = 20
+        elif distinct_urls == 2:
+            corroboration_bonus = 10
 
         score = _title_weight(primary.title) * 3
         score += (len(sources) - 1) * 15
+        score += corroboration_bonus
 
         # Business-name surname match is the STRONGEST signal for
         # owner-operators. "Daniel Clement" at "Clement Law", "Todd
@@ -1636,6 +1694,13 @@ def _synthesise_owners(
         primary.confidence = max(0, min(100, score))
         primary.source = " + ".join(sorted(sources))
         primary.title = max(titles, key=_title_weight) if titles else primary.title
+        # Stash the page-corroboration count on raw_snippet so the CSV
+        # export can surface it for operators.
+        if distinct_urls >= 2:
+            primary.raw_snippet = (
+                (primary.raw_snippet or "") +
+                f" [seen on {distinct_urls} pages]"
+            )[:200]
         merged.append(primary)
 
     merged.sort(key=lambda x: x.confidence, reverse=True)
@@ -1869,7 +1934,22 @@ def _nb_verify_cached(email: str, cache: _Cache) -> dict:
         if not cached.get("credit_exhausted"):
             return cached
 
-    # Pre-flight: skip entirely if we know the account has 0 credits.
+    # Pre-flight #1: domain must have MX records (free DNS lookup).
+    # If it doesn't, the domain can't receive mail at all — skip the
+    # NB call and mark invalid. Free to check, saves $0.003/call on
+    # dead domains.
+    try:
+        from src.mx_check import email_has_mx
+        if not email_has_mx(email):
+            result = {"safe_to_send": False, "result": "invalid",
+                      "error": "no_mx_records",
+                      "skipped_nb": True}
+            cache.set("nb_verify", result, email)
+            return result
+    except Exception:
+        pass  # dns module missing or lookup failed — fall through to NB
+
+    # Pre-flight #2: skip entirely if we know the account has 0 credits.
     # Cached for 5 minutes so we don't poll NB on every call.
     if not _nb_credits_available():
         return {"safe_to_send": False, "result": "unknown",

@@ -109,8 +109,7 @@ def _load_credentials():
     return creds
 
 
-def get_gmail_service():
-    """Return a Gmail API service, or None if auth isn't set up."""
+def _build_service():
     creds = _load_credentials()
     if not creds:
         return None
@@ -120,6 +119,21 @@ def get_gmail_service():
     except Exception as e:
         logger.warning(f"build('gmail', 'v1') failed: {e}")
         return None
+
+
+def get_gmail_service():
+    """
+    Return a Gmail API service, or None if auth isn't set up.
+    Cached for the lifetime of the process under Streamlit
+    (@st.cache_resource) so we don't re-authorise + re-build the
+    Discovery client on every rerun.
+    """
+    try:
+        import streamlit as st
+        return st.cache_resource(_build_service)()  # type: ignore[no-any-return]
+    except Exception:
+        # Not inside a Streamlit context (e.g. CLI / tests) — just build.
+        return _build_service()
 
 
 def is_available() -> bool:

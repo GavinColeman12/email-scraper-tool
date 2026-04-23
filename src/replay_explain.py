@@ -188,9 +188,10 @@ def explain_biz(biz_replay: dict) -> BizExplanation:
                               candidate_summary=summary, dm_name=dm_name)
 
     # All-generic case (filtered by pick_best)
+    from src.volume_mode.stopwords import is_generic
     generic_like = [c for c in cands
                     if "@" in (c.get("email") or "")
-                    and _looks_generic(c["email"].split("@", 1)[0])]
+                    and is_generic(c["email"].split("@", 1)[0])]
     if generic_like and len(generic_like) == len(cands):
         reason = ("⚫ Only generic/shared-inbox emails were findable (info@, "
                   "contact@, hello@, etc.). Volume mode never picks these — "
@@ -202,21 +203,6 @@ def explain_biz(biz_replay: dict) -> BizExplanation:
               f"candidates={len(cands)}, invalid={len(invalid)}, untested={len(untested)}.")
     return BizExplanation("empty", "warn", reason,
                           candidate_summary=summary, dm_name=dm_name)
-
-
-def _looks_generic(local: str) -> bool:
-    """Cheap client-side generic check — keeps explain.py dependency-free."""
-    lp = (local or "").lower()
-    if not lp:
-        return True
-    if "info" in lp:
-        return True
-    for g in ("contact", "hello", "sales", "support", "admin", "office",
-              "team", "mail", "help", "service", "reception", "noreply",
-              "welcome", "smile", "alumni", "partners", "leadership"):
-        if lp == g or lp.startswith(g):
-            return True
-    return False
 
 
 @dataclass

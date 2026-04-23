@@ -125,17 +125,22 @@ def _upsert_send(
     conn = _connect()
     try:
         cur = _cursor(conn)
-        # Dedupe on (email, sent_at truncated to minute)
+        # Dedupe on (email, sent_at truncated to minute). Using
+        # `< sent_minute + 1 minute` to cover the whole 60-second window
+        # — the old code used `< replace(second=59)`, which wrongly let a
+        # 12:00:59.5 and 12:01:00 pair escape dedup.
+        from datetime import timedelta
         sent_minute = sent_at.replace(second=0, microsecond=0)
+        next_minute = sent_minute + timedelta(minutes=1)
         if USE_PG:
             cur.execute(
                 "SELECT id FROM email_sends WHERE email=%s AND sent_at >= %s AND sent_at < %s",
-                (email, sent_minute, sent_minute.replace(second=59)),
+                (email, sent_minute, next_minute),
             )
         else:
             cur.execute(
                 "SELECT id FROM email_sends WHERE email=? AND sent_at >= ? AND sent_at < ?",
-                (email, sent_minute.isoformat(), sent_minute.replace(second=59).isoformat()),
+                (email, sent_minute.isoformat(), next_minute.isoformat()),
             )
         if cur.fetchone():
             return False

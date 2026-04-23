@@ -561,6 +561,88 @@ def scrape_volume(
     tier = confidence_tier(winner)
     result.confidence_tier = tier
 
+    # ── Post-pick DM correction ──
+    # When the winning email's local part names a DIFFERENT provider than
+    # the one we labeled as DM (Carlos Lorenzo vs jml@joselorenzolaw.com
+    # where JML = Jose M Lorenzo), relabel the DM so the salutation
+    # matches the actual recipient. Also promotes a domain-lastname
+    # match over any incumbent DM — the person whose last name is in
+    # the domain is almost always the founder.
+    if winner and ranked:
+        from src.name_equivalence import names_match
+        winner_local = (winner.email.split("@", 1)[0].lower()
+                        if "@" in winner.email else "")
+        domain_core = domain.lower() if domain else ""
+        # Strip TLD + common suffixes to isolate the "memorable" part
+        import re as _re
+        domain_tokens = set(_re.split(r"[^a-z]+", _re.sub(
+            r"\.(com|org|net|co|law|us|io|biz|info).*$", "", domain_core)))
+        domain_tokens -= {"", "law", "firm", "office", "group", "legal"}
+
+        def _local_matches_provider(p) -> bool:
+            first = (p.first_name or "").lower()
+            last = (p.last_name or "").lower()
+            if not (first and last):
+                return False
+            # Test every common local-part pattern against the provider
+            patterns = {
+                first, last,
+                f"{first}.{last}", f"{first[0]}{last}",
+                f"{first}{last}", f"{first[0]}.{last}",
+                f"{first}{last[0]}",
+            }
+            # Nickname equivalence: jeff matches jeffrey, liz matches elizabeth
+            extra_firsts = {ef for ef in
+                            __import__("src.name_equivalence",
+                                       fromlist=["equivalents"])
+                            .equivalents(first)}
+            for ef in extra_firsts:
+                patterns |= {ef, f"{ef}.{last}", f"{ef[0]}{last}",
+                             f"{ef}{last}"}
+            return winner_local in patterns
+
+        # Score candidates: strong match + domain-lastname wins
+        best_provider = None
+        best_score = -1
+        for p in ranked:
+            score = 0
+            matches = _local_matches_provider(p)
+            last = (p.last_name or "").lower()
+            if matches:
+                score += 5
+            if last and len(last) >= 4 and last in domain_core:
+                score += 3
+            # Founder-title bonus
+            title = (getattr(p, "title", "") or "").lower()
+            if any(t in title for t in ("founder", "owner", "ceo",
+                                         "president", "principal")):
+                score += 1
+            if score > best_score:
+                best_score = score
+                best_provider = p
+
+        # Apply correction only when we found a strong alternate (≥5 =
+        # had a name-pattern match). Otherwise keep the original DM.
+        if best_provider and best_score >= 5 and dm and (
+            best_provider.full_name.lower() != dm.full_name.lower()
+        ):
+            result.evidence_trail["dm_corrected_post_pick"] = (
+                f"was '{dm.full_name}', corrected to '{best_provider.full_name}' "
+                f"because winner local '{winner_local}' matches that provider's "
+                f"name pattern{' and domain contains their last name' if best_score >= 8 else ''}"
+            )
+            dm = best_provider
+            result.decision_maker = dm
+        elif best_provider and best_score >= 8 and not dm:
+            # No DM was chosen but we have a domain-lastname + name-match candidate
+            dm = best_provider
+            result.decision_maker = dm
+            result.evidence_trail["dm_recovered_post_pick"] = (
+                f"no DM before; assigned '{best_provider.full_name}' because "
+                f"winner local '{winner_local}' matches this provider's name "
+                f"AND last name is in the domain"
+            )
+
     if winner is not None:
         result.best_email = winner.email
         result.best_email_evidence = [winner.source]

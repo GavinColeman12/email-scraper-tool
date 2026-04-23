@@ -187,6 +187,57 @@ def extract_js_assembled_emails(html: str) -> list:
     return list(dict.fromkeys(emails))
 
 
+# ── Attribute extractor (mailto hrefs, aria-labels, data-email) ───────
+
+def extract_attribute_emails(html: str) -> list:
+    """
+    Extract emails from HTML attributes commonly used for contact info
+    but easy to miss in plain-text regex:
+      - <a href="mailto:foo@bar.com">
+      - <a aria-label="Email John at foo@bar.com">
+      - <button data-email="foo@bar.com">
+      - <span data-mail="foo@bar.com">
+      - <input name="email" value="foo@bar.com"> (admin leaks)
+    Some templates hide these behind JS obfuscation that the regex
+    pass over rendered text misses entirely.
+    """
+    if not html:
+        return []
+    emails = []
+    soup = BeautifulSoup(html, "html.parser")
+    email_re = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+    # mailto: hrefs — most common hidden source
+    for a in soup.find_all("a", href=True):
+        href = a["href"] or ""
+        if href.lower().startswith("mailto:"):
+            body = href[7:].split("?", 1)[0]  # strip "?subject=..." params
+            for e in email_re.findall(body):
+                emails.append(e.lower())
+
+    # aria-label, title, alt — accessibility attrs often include emails
+    for tag in soup.find_all(True):
+        for attr in ("aria-label", "title", "alt", "value"):
+            v = tag.get(attr)
+            if not v:
+                continue
+            for e in email_re.findall(str(v)):
+                emails.append(e.lower())
+
+    # data-* attributes: data-email, data-mail, data-contact, data-cfemail decoded
+    for tag in soup.find_all(True):
+        attrs = tag.attrs or {}
+        for k, v in attrs.items():
+            if not isinstance(k, str) or not k.startswith("data-"):
+                continue
+            if not v:
+                continue
+            for e in email_re.findall(str(v)):
+                emails.append(e.lower())
+
+    return list(dict.fromkeys(emails))  # dedupe preserving order
+
+
 # ── Master extractor ──────────────────────────────────────────────────
 
 def extract_all_hidden_emails(html: str) -> dict:
@@ -201,11 +252,12 @@ def extract_all_hidden_emails(html: str) -> dict:
         "jsonld": [...],
         "meta": [...],
         "js_assembled": [...],
+        "attributes": [...],
     }
     """
     if not html:
         return {k: [] for k in ("cloudflare", "obfuscated", "html_entities",
-                                   "jsonld", "meta", "js_assembled")}
+                                 "jsonld", "meta", "js_assembled", "attributes")}
 
     # Decode HTML entities first so they show up in subsequent passes
     decoded_html = decode_html_entities(html)
@@ -217,6 +269,7 @@ def extract_all_hidden_emails(html: str) -> dict:
         "jsonld": extract_jsonld_emails(html),
         "meta": extract_meta_emails(html),
         "js_assembled": extract_js_assembled_emails(html),
+        "attributes": extract_attribute_emails(html),
     }
 
 

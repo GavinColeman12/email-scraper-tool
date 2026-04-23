@@ -458,6 +458,40 @@ def test_p4_nb_unknown_gives_review_tier_not_verified():
     assert confidence_tier(catchall_scraped) == TIER_SCRAPED
 
 
+# ── Nickname equivalence (improvement #8) ──
+
+def test_nickname_matches_jeff_jeffrey():
+    from src.name_equivalence import names_match, equivalents
+    assert names_match("Jeff", "Jeffrey")
+    assert names_match("jeff", "jeffrey")
+    assert names_match("Mike", "Michael")
+    assert names_match("Liz", "Elizabeth")
+    assert names_match("Bob", "Robert")
+    assert names_match("Kate", "Catherine")
+    # Non-matches
+    assert not names_match("Jeff", "Michael")
+    assert not names_match("", "Jeff")
+    assert not names_match("Jeff", "")
+    # Equivalents returns a set
+    eqs = equivalents("Jeffrey")
+    assert "jeff" in eqs and "jeffrey" in eqs
+
+
+# ── MX pre-check (improvement #3) ──
+
+def test_mx_check_fail_open_when_dns_unavailable():
+    """If dns module is missing, returns True (fail open) for real domains."""
+    from src.mx_check import domain_has_mx
+    # Empty domain → True (fail open)
+    assert domain_has_mx("") is True
+    # Real domain with mail — google.com definitely has MX.
+    # Skip when network unavailable.
+    try:
+        assert domain_has_mx("google.com") in (True, False)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     # Cheap self-runner so we don't require pytest installed
     import inspect

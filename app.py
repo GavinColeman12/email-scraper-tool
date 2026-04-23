@@ -95,7 +95,17 @@ st.divider()
 # ROW 1 — Lifetime KPIs
 # ══════════════════════════════════════════════════════════════════════
 
-kpis = lifetime_kpis()
+# Cache dashboard aggregates for 60s — dashboard reruns on every
+# widget click and each query scans the businesses table. 60s is
+# short enough that a sync immediately shows up on the next refresh.
+_cached_kpis = st.cache_data(ttl=60)(lifetime_kpis)
+_cached_rollup = st.cache_data(ttl=60)(daily_rollup)
+_cached_rollup_v = st.cache_data(ttl=60)(daily_rollup_by_vertical)
+_cached_searches = st.cache_data(ttl=60)(enriched_searches)
+_cached_industries = st.cache_data(ttl=300)(industry_options)
+_cached_location = st.cache_data(ttl=60)(outreach_by_location)
+
+kpis = _cached_kpis()
 
 st.subheader("Lifetime metrics")
 row1 = st.columns(4)
@@ -173,7 +183,7 @@ with fc1:
         horizontal=True,
     )
 with fc2:
-    industries = industry_options()
+    industries = _cached_industries()
     industry_filter = st.selectbox(
         "Industry filter (macro vertical)",
         options=["(all)"] + industries,
@@ -183,7 +193,7 @@ with fc2:
     )
 
 industry_arg = None if industry_filter == "(all)" else industry_filter
-rollup = daily_rollup(days=int(window), industry=industry_arg)
+rollup = _cached_rollup(days=int(window), industry=industry_arg)
 
 df = pd.DataFrame(rollup)
 if df.empty or df[["found", "sent", "bounces", "dms", "safe"]].sum().sum() == 0:
@@ -237,7 +247,7 @@ st.caption(
     "can see which categories are driving the totals. Legend is clickable."
 )
 
-vert = daily_rollup_by_vertical(days=int(window))
+vert = _cached_rollup_v(days=int(window))
 if vert.get("scrape") or vert.get("outreach"):
     # Aggregate to match the Day/Week toggle above
     def _pivot(series: dict, days: list[str]) -> pd.DataFrame:
@@ -278,7 +288,7 @@ st.divider()
 
 st.subheader("🌎 Where outreach is going")
 
-loc = outreach_by_location(days=365)
+loc = _cached_location(days=365)
 if not (loc.get("by_state") or loc.get("by_city")):
     st.info(
         "No outreach logged yet. Run the 🔄 Gmail sync above to pull sends "
@@ -339,7 +349,7 @@ st.divider()
 
 st.subheader("Recent searches")
 
-searches = enriched_searches(limit=50)
+searches = _cached_searches(limit=50)
 if not searches:
     st.info("No searches yet. Head to **🔎 Find Businesses** to start.")
 else:
