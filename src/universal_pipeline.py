@@ -2267,7 +2267,69 @@ def triangulate_email(
     result.candidate_emails = candidates
 
     # ── PHASE 7: Decision gate ──
-    top = candidates[0]
+    # Generic inbox rejection — same rule volume mode enforces. info@,
+    # contact@, admin@, partners@, intakes@, info-* etc. never win as
+    # primary pick, even when NB says valid. Analysis of search #41
+    # showed triangulation was picking 13 generic inboxes that wouldn't
+    # reach the DM (shared mailboxes at law firms auto-filter cold
+    # outreach). Better to return empty than send to a dead end.
+    try:
+        from src.volume_mode.stopwords import is_generic as _is_generic
+    except Exception:
+        def _is_generic(local: str, business_name: str = "") -> bool:
+            return False
+
+    biz_name_for_filter = business_name or ""
+
+    def _acceptable(c: dict) -> bool:
+        email = (c.get("email") or "")
+        if "@" not in email:
+            return False
+        local = email.split("@", 1)[0]
+        return not _is_generic(local, business_name=biz_name_for_filter)
+
+    eligible = [c for c in candidates if _acceptable(c)]
+
+    if not eligible:
+        # No non-generic candidate survived — return empty with a
+        # reason the operator can read.
+        result.best_email = ""
+        result.best_email_confidence = 0
+        result.best_email_evidence = [
+            "⚫ No deliverable non-generic email produced. Every scraped "
+            "email on this domain is a shared inbox (info@, contact@, etc.) "
+            "and every constructed DM pattern NB-invalided. Genuinely "
+            "unreachable via cold outreach."
+        ]
+        result.safe_to_send = False
+        result.time_seconds = round(time.time() - start, 2)
+        _record_cache_savings(result, cache)
+        return result
+
+    top = eligible[0]
+    # Skip bucket-D/E-style constructed candidates that came back
+    # NB-invalid — proven-bounce addresses should never win. Walk
+    # down the eligible list until we find one that isn't a confirmed
+    # bounce, or run out (return empty).
+    for cand in eligible:
+        if cand.get("nb_result") == "invalid" and cand.get("source") in (
+            "industry_prior", "first_last_fallback"
+        ):
+            continue
+        top = cand
+        break
+    else:
+        result.best_email = ""
+        result.best_email_confidence = 0
+        result.best_email_evidence = [
+            "⚫ Every constructed DM pattern came back NB-invalid. "
+            "Domain confirmed to reject mail at first.last / flast / etc."
+        ]
+        result.safe_to_send = False
+        result.time_seconds = round(time.time() - start, 2)
+        _record_cache_savings(result, cache)
+        return result
+
     result.best_email = top["email"]
     result.best_email_confidence = top["confidence"]
     result.best_email_evidence = _build_evidence(top, result)
@@ -2284,6 +2346,19 @@ def triangulate_email(
             result.best_email_evidence.append(
                 f"⚠️ Below threshold ({top['confidence']} < {confidence_threshold})"
             )
+
+    # If the eligible list differed from the full candidate list, note
+    # which generic inboxes were suppressed so the evidence trail
+    # shows the operator what we skipped.
+    suppressed = [c["email"] for c in candidates
+                   if c not in eligible and c.get("email")]
+    if suppressed:
+        result.best_email_evidence.append(
+            f"ℹ️ Suppressed {len(suppressed)} generic-inbox candidate"
+            f"{'s' if len(suppressed) != 1 else ''}: "
+            f"{', '.join(suppressed[:3])}"
+            f"{'…' if len(suppressed) > 3 else ''}"
+        )
 
     result.time_seconds = round(time.time() - start, 2)
     _record_cache_savings(result, cache)
