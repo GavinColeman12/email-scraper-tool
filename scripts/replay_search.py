@@ -32,6 +32,10 @@ from src.replay_storage import save_replay, list_replays, get_replay
 from src.universal_pipeline import scrape_with_triangulation
 
 
+# Supported replay modes — must stay in sync with Bulk Scrape.
+REPLAY_MODES = ("triangulation", "volume", "basic", "verified", "deep")
+
+
 # Local parts that indicate a generic shared inbox (not a decision maker).
 GENERIC_LOCAL_PARTS = {
     "info", "contact", "contactus", "hello", "hi", "team", "support",
@@ -95,7 +99,8 @@ def _compute_metrics(rows: list) -> dict:
 
 
 def _serialise_result(result) -> dict:
-    """Extract the decision-relevant fields from a TriangulationResult."""
+    """Extract the decision-relevant fields from a TriangulationResult
+    or VolumeResult (same relevant attrs on both)."""
     dm = asdict(result.decision_maker) if result.decision_maker else None
     pat = asdict(result.detected_pattern) if result.detected_pattern else None
     top_nb = None
@@ -108,13 +113,76 @@ def _serialise_result(result) -> dict:
         "best_email_confidence": result.best_email_confidence,
         "best_email_nb_result": top_nb,
         "safe_to_send": result.safe_to_send,
-        "risky_catchall": result.risky_catchall,
+        "risky_catchall": getattr(result, "risky_catchall", False),
         "decision_maker": dm,
         "detected_pattern": pat,
         "candidate_emails": result.candidate_emails,
-        "agents_succeeded": result.agents_succeeded,
-        "time_seconds": result.time_seconds,
+        "agents_succeeded": getattr(result, "agents_succeeded", []),
+        "time_seconds": getattr(result, "time_seconds", 0),
     }
+
+
+def _serialise_legacy_dict(d: dict) -> dict:
+    """Shape a scrape_result dict (basic/verified/deep) into the replay row
+    shape. These modes don't have TriangulationResult objects — we project
+    their flat dict into the same fields so Compare works across modes."""
+    emails = d.get("scraped_emails") or []
+    dm_name = d.get("contact_name") or ""
+    dm = None
+    if dm_name:
+        parts = dm_name.strip().split(None, 1)
+        dm = {
+            "first_name": parts[0] if parts else "",
+            "last_name": parts[1] if len(parts) > 1 else "",
+            "full_name": dm_name,
+            "title": d.get("contact_title") or "",
+        }
+    return {
+        "best_email": d.get("primary_email") or "",
+        "best_email_confidence": int(d.get("confidence_score") or 0),
+        "best_email_nb_result": d.get("neverbounce_result"),
+        "safe_to_send": bool(d.get("email_safe_to_send")),
+        "risky_catchall": False,
+        "decision_maker": dm,
+        "detected_pattern": None,
+        "candidate_emails": [{"email": e} for e in emails],
+        "agents_succeeded": [],
+        "time_seconds": 0,
+    }
+
+
+def _dispatch_scrape(business: dict, mode: str) -> dict:
+    """Route a single biz to the requested pipeline and return a uniform
+    replay-row dict. Keeps run_replay() agnostic of mode internals."""
+    addr = business.get("address") or business.get("location") or ""
+    city = addr.split(",")[0].strip() if addr else ""
+    biz_type = business.get("business_type") or ""
+    phone = business.get("phone") or ""
+
+    if mode == "volume":
+        from src.volume_mode import scrape_volume
+        vres = scrape_volume(business, use_neverbounce=True)
+        return _serialise_result(vres)
+    if mode == "triangulation":
+        return _serialise_result(scrape_with_triangulation(business))
+    if mode == "deep":
+        from src.deep_scraper import deep_scrape_business_emails
+        return _serialise_legacy_dict(deep_scrape_business_emails(
+            business_name=business.get("business_name", ""),
+            website=business.get("website", ""),
+            location=city, verify_with_mx=True,
+            business_type=biz_type, address=addr, phone=phone,
+        ))
+    if mode in ("verified", "basic"):
+        from src.email_scraper import scrape_business_emails
+        return _serialise_legacy_dict(scrape_business_emails(
+            business_name=business.get("business_name", ""),
+            website=business.get("website", ""),
+            find_decision_makers=True, location=city, auto_verify=True,
+            use_haiku_fallback=(mode == "verified"),
+            business_type=biz_type, address=addr, phone=phone,
+        ))
+    raise ValueError(f"Unknown replay mode: {mode!r}. Expected one of {REPLAY_MODES}")
 
 
 def _original_row(b: dict) -> dict:
@@ -147,7 +215,10 @@ def _original_row(b: dict) -> dict:
 
 
 def run_replay(search_id: int, label: str, limit: int = None,
-               verbose: bool = True) -> int:
+               verbose: bool = True, mode: str = "triangulation") -> int:
+    if mode not in REPLAY_MODES:
+        raise ValueError(f"Invalid mode {mode!r}; expected one of {REPLAY_MODES}")
+
     search = get_search(search_id)
     if not search:
         print(f"ERROR: search {search_id} not found", file=sys.stderr)
@@ -157,9 +228,16 @@ def run_replay(search_id: int, label: str, limit: int = None,
     if limit:
         businesses = businesses[:limit]
 
+    # Volume mode uses a shared per-run budget tracker — reset it so a
+    # previous run doesn't gate this one.
+    if mode == "volume":
+        from src.volume_mode.pipeline import reset_run_budget
+        reset_run_budget(25.0)
+
     if verbose:
         print(f"Replaying {len(businesses)} businesses from search #{search_id} "
-              f"({search.get('query')!r}) label={label!r}", file=sys.stderr)
+              f"({search.get('query')!r}) mode={mode!r} label={label!r}",
+              file=sys.stderr)
 
     replay_rows = []
     original_rows = []
@@ -168,8 +246,7 @@ def run_replay(search_id: int, label: str, limit: int = None,
         if not b.get("website"):
             continue
         try:
-            result = scrape_with_triangulation(b)
-            row = _serialise_result(result)
+            row = _dispatch_scrape(b, mode)
         except Exception as e:
             if verbose:
                 print(f"  [{i+1}/{len(businesses)}] {b.get('business_name')!r} ERROR: {e}",
@@ -208,7 +285,7 @@ def run_replay(search_id: int, label: str, limit: int = None,
         combined.append({"original": o, "replay": r,
                          "changed": o.get("best_email") != r.get("best_email")})
 
-    replay_id = save_replay(search_id, label, combined, metrics)
+    replay_id = save_replay(search_id, label, combined, metrics, mode=mode)
 
     if verbose:
         print(f"\nReplay #{replay_id} saved in {t_total}s", file=sys.stderr)
@@ -291,6 +368,8 @@ def main():
     r.add_argument("--search-id", type=int, required=True)
     r.add_argument("--label", default="replay")
     r.add_argument("--limit", type=int, default=None)
+    r.add_argument("--mode", choices=REPLAY_MODES, default="triangulation",
+                   help="Which pipeline to re-run with (default: triangulation)")
     r.add_argument("--quiet", action="store_true")
 
     d = sub.add_parser("diff", help="Diff two replays")
@@ -303,7 +382,8 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "run":
-        run_replay(args.search_id, args.label, args.limit, not args.quiet)
+        run_replay(args.search_id, args.label, args.limit, not args.quiet,
+                   mode=args.mode)
     elif args.cmd == "diff":
         cmd_diff(args.replay_a, args.replay_b)
     elif args.cmd == "list":

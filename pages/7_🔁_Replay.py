@@ -19,7 +19,18 @@ from src.replay_storage import list_replays, get_replay, init_replay_tables
 from src.replay_explain import (
     explain_biz, explain_change, bucket_label, _tier_rank,
 )
-from scripts.replay_search import run_replay
+from src.dashboard_queries import search_metadata
+from scripts.replay_search import run_replay, REPLAY_MODES
+
+
+# Short human descriptions for each mode (used in the selector help text).
+MODE_HELP = {
+    "volume":        "🚀 Volume — deep crawl + Wayback + selective NB (~30s/biz, <$4/200, never picks info@). Use for mass outreach.",
+    "triangulation": "🎯 Triangulation — 5 parallel agents + NPI + NB gate (~45s/biz, ~$5-6/100). Use for high-stakes.",
+    "deep":          "🧠 Deep — 4 agents + Sonnet + SMTP (~10s/biz, ~$2/200, <2% bounce).",
+    "verified":      "✅ Verified — rules + Haiku fallback + SMTP (~6s/biz, ~$0.30/200).",
+    "basic":         "⚡ Basic — rules + SMTP only (~5s/biz, free, <5% bounce).",
+}
 
 
 st.set_page_config(page_title="Replay", page_icon="🔁", layout="wide")
@@ -50,15 +61,27 @@ tab_new, tab_inspect, tab_compare = st.tabs([
 with tab_new:
     st.markdown(
         "**Replay pulls from caches — no SearchApi credits burned, minimal NB.** "
-        "Pick a search, label the run, and hit Go. Large searches take ~30–60s/biz."
+        "Pick a search, choose a mode, label the run. Use this to A/B an old "
+        "campaign against today's logic — e.g. re-run an old triangulation "
+        "search with the new volume scraper."
     )
-    labels = {s["id"]: f"#{s['id']} — {s['query']} · {s.get('business_count', 0)} biz"
-              for s in searches}
+
+    # Enriched dropdown: biz count + primary industry + date + query.
+    meta = search_metadata([s["id"] for s in searches])
+
+    def _fmt_search(sid: int) -> str:
+        m = meta.get(int(sid)) or {}
+        created = str(m.get("created_at") or "")[:10]
+        biz = m.get("biz_count") or 0
+        ind = m.get("primary_industry") or "—"
+        q = (m.get("query") or "").strip()[:40]
+        return f"#{sid} · {created} · {biz} biz · {ind} · {q}"
+
     c1, c2, c3 = st.columns([3, 2, 1])
     search_id = c1.selectbox(
         "Search to replay",
-        options=list(labels.keys()),
-        format_func=lambda k: labels[k],
+        options=[s["id"] for s in searches],
+        format_func=_fmt_search,
     )
     label = c2.text_input(
         "Label", value="",
@@ -69,12 +92,24 @@ with tab_new:
     limit = c3.number_input("Limit", min_value=0, value=0, step=5,
                             help="0 = replay every business in the search")
 
+    # Mode selector — defaults to volume (cheap, same columns as triangulation,
+    # best for "what would today's volume scraper do with this old campaign").
+    mode = st.radio(
+        "Which pipeline to re-run with",
+        options=list(REPLAY_MODES),
+        index=list(REPLAY_MODES).index("volume"),
+        format_func=lambda m: MODE_HELP.get(m, m),
+        horizontal=False,
+        help="Pick any mode — Compare will let you diff two modes on the "
+             "same search (e.g. old triangulation vs new volume).",
+    )
+
     if st.button("🔁 Run replay", type="primary",
                  disabled=not label.strip(),
                  help="Labeled replays are searchable later; enter a label to enable."):
         with st.spinner(
-            "Running replay… each biz takes 30-60s. Progress streams to "
-            "the terminal. A 60-biz replay is ~30-45 min."
+            f"Running {mode} replay… each biz takes ~30-60s. Progress "
+            "streams to the terminal. A 60-biz replay is ~30-45 min."
         ):
             try:
                 replay_id = run_replay(
@@ -82,11 +117,12 @@ with tab_new:
                     label=label.strip() or "replay",
                     limit=int(limit) if limit else None,
                     verbose=False,
+                    mode=mode,
                 )
             except Exception as e:
                 st.error(f"Replay failed: {e}")
                 st.stop()
-        st.success(f"✅ Replay #{replay_id} saved. Switch to **🔍 Inspect** to read it.")
+        st.success(f"✅ Replay #{replay_id} ({mode}) saved. Switch to **🔍 Inspect** to read it.")
         st.rerun()
 
     st.divider()
@@ -96,12 +132,16 @@ with tab_new:
     if not replays:
         st.caption("No replays yet.")
     else:
+        past_meta = search_metadata([r["original_search_id"] for r in replays[:50]])
         rows = []
         for r in replays[:50]:
             m = (r.get("metrics") or {}).get("replay", {})
+            sm = past_meta.get(int(r["original_search_id"])) or {}
             rows.append({
                 "#": r["id"],
                 "Search": r["original_search_id"],
+                "Industry": sm.get("primary_industry") or "—",
+                "Mode": r.get("mode") or "triangulation",
                 "Label": r.get("label") or "",
                 "Created": str(r["created_at"])[:16],
                 "Git": (r.get("git_sha") or "")[:7],
@@ -129,8 +169,14 @@ with tab_inspect:
         st.info("No replays yet. Run one in the **🆕 Run a replay** tab.")
         st.stop()
 
-    rep_labels = {r["id"]: f"#{r['id']} · {r.get('label','?')} · search {r['original_search_id']}"
-                  for r in replays}
+    meta_i = search_metadata([r["original_search_id"] for r in replays])
+    def _fmt_rep(r: dict) -> str:
+        sm = meta_i.get(int(r["original_search_id"])) or {}
+        mode_tag = r.get("mode") or "triangulation"
+        return (f"#{r['id']} · {mode_tag} · {sm.get('primary_industry') or '—'} "
+                f"· {sm.get('biz_count') or 0} biz · {r.get('label') or '?'} "
+                f"(search {r['original_search_id']})")
+    rep_labels = {r["id"]: _fmt_rep(r) for r in replays}
     inspect_id = st.selectbox(
         "Pick a replay to inspect",
         options=list(rep_labels.keys()),
@@ -232,8 +278,13 @@ with tab_compare:
         st.info("Run at least 2 replays to compare.")
         st.stop()
 
-    rep_labels = {r["id"]: f"#{r['id']} · {r.get('label','?')} · search {r['original_search_id']}"
-                  for r in replays}
+    meta_c = search_metadata([r["original_search_id"] for r in replays])
+    def _fmt_rep_c(r: dict) -> str:
+        sm = meta_c.get(int(r["original_search_id"])) or {}
+        mode_tag = r.get("mode") or "triangulation"
+        return (f"#{r['id']} · {mode_tag} · {sm.get('primary_industry') or '—'} "
+                f"· {r.get('label') or '?'} (search {r['original_search_id']})")
+    rep_labels = {r["id"]: _fmt_rep_c(r) for r in replays}
 
     cc1, cc2 = st.columns(2)
     a_id = cc1.selectbox("Before (A)", options=list(rep_labels.keys()),
@@ -249,6 +300,22 @@ with tab_compare:
     b = get_replay(int(b_id))
     ma = (a.get("metrics") or {}).get("replay", {})
     mb = (b.get("metrics") or {}).get("replay", {})
+
+    # Mode + search provenance — tells the operator whether this is an
+    # apples-to-apples comparison (same search, same mode) or a
+    # cross-mode experiment (e.g. old triangulation vs new volume).
+    a_mode = a.get("mode") or "triangulation"
+    b_mode = b.get("mode") or "triangulation"
+    a_search = a.get("original_search_id")
+    b_search = b.get("original_search_id")
+    if a_search == b_search and a_mode != b_mode:
+        st.info(f"⚖️ Cross-mode replay of the same search #{a_search}: "
+                f"**{a_mode}** → **{b_mode}**. Deltas show which pipeline "
+                f"wins on this campaign with today's logic.")
+    elif a_search != b_search:
+        st.warning(f"Different source searches (A=#{a_search}, B=#{b_search}). "
+                   "Deltas aren't apples-to-apples at the biz level — "
+                   "only the aggregate percentages are meaningful.")
 
     # Headline deltas
     st.subheader("Headline deltas (after vs before)")

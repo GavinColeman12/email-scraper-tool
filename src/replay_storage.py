@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS replay_runs (
     id {serial},
     original_search_id INTEGER,
     label TEXT,
+    mode TEXT,
     git_sha TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     businesses_json TEXT,
@@ -29,6 +30,12 @@ CREATE TABLE IF NOT EXISTS replay_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_replay_original ON replay_runs(original_search_id);
 """
+
+
+# Pre-existing installs won't have the mode column — add it if missing.
+# Safe on both Postgres (IF NOT EXISTS) and SQLite (try/except on dup).
+_MIGRATE_PG = "ALTER TABLE replay_runs ADD COLUMN IF NOT EXISTS mode TEXT"
+_MIGRATE_SQLITE = "ALTER TABLE replay_runs ADD COLUMN mode TEXT"
 
 
 _INITIALIZED = False
@@ -44,8 +51,13 @@ def init_replay_tables() -> None:
         cur = _cursor(conn)
         if USE_PG:
             cur.execute(SCHEMA.format(serial="SERIAL PRIMARY KEY"))
+            cur.execute(_MIGRATE_PG)
         else:
             conn.executescript(SCHEMA.format(serial="INTEGER PRIMARY KEY AUTOINCREMENT"))
+            try:
+                cur.execute(_MIGRATE_SQLITE)
+            except Exception:
+                pass  # column already exists
         conn.commit()
         _INITIALIZED = True
     finally:
@@ -68,7 +80,11 @@ def save_replay(
     label: str,
     businesses: list,
     metrics: dict,
+    mode: str = "triangulation",
 ) -> int:
+    """Persist a replay run. `mode` tags which pipeline was used
+    (volume / triangulation / basic / verified / deep) so Compare can
+    do apples-to-apples."""
     init_replay_tables()
     conn = _connect()
     try:
@@ -76,21 +92,22 @@ def save_replay(
         payload = (
             original_search_id,
             label,
+            mode,
             _git_sha(),
             json.dumps(businesses, default=str),
             json.dumps(metrics, default=str),
         )
         if USE_PG:
             cur.execute(
-                "INSERT INTO replay_runs (original_search_id, label, git_sha, "
-                "businesses_json, metrics_json) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                "INSERT INTO replay_runs (original_search_id, label, mode, git_sha, "
+                "businesses_json, metrics_json) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                 payload,
             )
             new_id = cur.fetchone()["id"]
         else:
             cur.execute(
-                "INSERT INTO replay_runs (original_search_id, label, git_sha, "
-                "businesses_json, metrics_json) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO replay_runs (original_search_id, label, mode, git_sha, "
+                "businesses_json, metrics_json) VALUES (?, ?, ?, ?, ?, ?)",
                 payload,
             )
             new_id = cur.lastrowid
@@ -107,14 +124,14 @@ def list_replays(original_search_id: Optional[int] = None) -> list:
         cur = _cursor(conn)
         if original_search_id is not None:
             cur.execute(
-                f"SELECT id, original_search_id, label, git_sha, created_at, metrics_json "
+                f"SELECT id, original_search_id, label, mode, git_sha, created_at, metrics_json "
                 f"FROM replay_runs WHERE original_search_id = {_PARAM} "
                 f"ORDER BY created_at DESC",
                 (original_search_id,),
             )
         else:
             cur.execute(
-                "SELECT id, original_search_id, label, git_sha, created_at, metrics_json "
+                "SELECT id, original_search_id, label, mode, git_sha, created_at, metrics_json "
                 "FROM replay_runs ORDER BY created_at DESC"
             )
         rows = cur.fetchall()

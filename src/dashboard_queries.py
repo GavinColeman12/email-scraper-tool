@@ -297,6 +297,55 @@ def normalize_vertical(raw: str) -> str:
     return "Other"
 
 
+def search_metadata(search_ids: list[int] | None = None) -> dict[int, dict]:
+    """
+    Per-search summary used by the Replay dropdowns. Fetches biz count,
+    primary industry (normalized vertical of the most common business_type),
+    and created_at for each search.
+
+    Returns {search_id: {biz_count, primary_industry, created_at, query}}.
+    Pass `search_ids=None` to get every search.
+    """
+    init_db()
+    conn = _connect()
+    try:
+        cur = _cursor(conn)
+        if search_ids:
+            # Parameter list for the IN clause — build placeholders inline.
+            ph = ",".join([_PARAM] * len(search_ids))
+            cur.execute(
+                f"SELECT id, query, created_at FROM searches WHERE id IN ({ph})",
+                tuple(search_ids),
+            )
+        else:
+            cur.execute("SELECT id, query, created_at FROM searches")
+        searches = [dict(r) for r in cur.fetchall()]
+
+        out: dict[int, dict] = {}
+        for s in searches:
+            sid = int(s["id"])
+            # Biz count + most-common business_type in one pass.
+            cur.execute(f"""
+                SELECT business_type, COUNT(*) AS c
+                FROM businesses
+                WHERE search_id = {_PARAM}
+                GROUP BY business_type
+                ORDER BY c DESC
+            """, (sid,))
+            rows = cur.fetchall()
+            total = sum(int(r["c"] or 0) for r in rows)
+            top_raw = rows[0]["business_type"] if rows else ""
+            out[sid] = {
+                "biz_count": total,
+                "primary_industry": normalize_vertical(top_raw or ""),
+                "created_at": s.get("created_at"),
+                "query": s.get("query") or "",
+            }
+        return out
+    finally:
+        conn.close()
+
+
 def industry_options() -> list[str]:
     """
     Return the macro verticals that actually have data in the DB,
