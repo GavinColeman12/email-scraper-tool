@@ -34,26 +34,59 @@ st.caption(
 # Dashboard reads from `email_sends` — real outreach lives in Gmail
 # until we pull it in. This button scans the last N days of Gmail and
 # upserts into email_sends (outreach threads) + marks bounces
-# (mailer-daemon threads).
+# (mailer-daemon threads). Authentication uses GMAIL_TOKEN_JSON
+# (Streamlit secret) or GMAIL_CREDENTIALS_PATH (local file).
+
+from src.gmail_client import is_available as _gmail_available, search_threads
+from src.gmail_sync import sync_from_gmail
+
 sync_col, sync_msg = st.columns([1, 3])
 with sync_col:
     sync_days = st.selectbox(
-        "Gmail sync window", [7, 14, 30, 60, 90], index=2,
+        "Gmail sync window", [7, 14, 30, 60, 90, 180], index=2,
         format_func=lambda d: f"Last {d} days",
         key="_sync_days",
     )
-    clicked = st.button("🔄 Sync sends & bounces from Gmail",
-                         help="Scans Gmail for outreach + mailer-daemon bounces "
-                              "and logs them to email_sends. Safe to re-run — "
-                              "dedupe's by (email, sent_minute).")
+    auth_ok = _gmail_available()
+    clicked = st.button(
+        "🔄 Sync sends & bounces from Gmail",
+        disabled=not auth_ok,
+        help=("Scans Gmail for outreach + mailer-daemon bounces and logs "
+              "them to email_sends. Safe to re-run — dedupe's by "
+              "(email, sent_minute).") if auth_ok else (
+              "Set GMAIL_TOKEN_JSON in Streamlit secrets (full token.json "
+              "contents as a JSON blob) or GMAIL_CREDENTIALS_PATH locally."),
+    )
 with sync_msg:
-    if clicked:
-        st.info(
-            "ℹ️ Gmail sync runs via the Gmail MCP integration. If your "
-            "environment doesn't have the MCP Gmail tool configured, "
-            "run the sync from your Claude Code session instead. "
-            "The DB table `email_sends` is the single source of truth "
-            "for the dashboard."
+    if not auth_ok:
+        st.warning(
+            "⚠️ **Gmail not authenticated.** Set one of these:\n\n"
+            "- **Streamlit Cloud:** Add `GMAIL_TOKEN_JSON` to app secrets — "
+            "paste the full contents of `token.json` as a single-line JSON blob.\n"
+            "- **Local:** `GMAIL_CREDENTIALS_PATH=../reputation-audit-tool/credentials/token.json` in `.env`.\n\n"
+            "Token needs `gmail.readonly` scope (send/compose optional)."
+        )
+    elif clicked:
+        with st.spinner(f"Syncing from Gmail (last {sync_days} days)…"):
+            try:
+                summary = sync_from_gmail(
+                    search_threads, days=int(sync_days),
+                )
+            except Exception as e:
+                st.error(f"Sync failed: {e}")
+                summary = {}
+        if summary:
+            st.success(
+                f"✅ Sync complete — added {summary.get('sent', 0)} sends, "
+                f"marked {summary.get('bounces', 0)} bounces "
+                f"(skipped {summary.get('skipped', 0)} non-outreach threads, "
+                f"{summary.get('errors', 0)} errors)."
+            )
+            st.rerun()
+    elif auth_ok:
+        st.caption(
+            "✓ Gmail connected. Click **🔄 Sync** to refresh the dashboard "
+            "with the latest sends + bounces from your outbox."
         )
 
 st.divider()
