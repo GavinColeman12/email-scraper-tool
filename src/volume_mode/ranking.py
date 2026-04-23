@@ -73,6 +73,8 @@ DM_PRIORITY_WALK = ("a", "b", "d", "c", "e")
 
 def pick_best(
     candidates: list[Candidate], *, business_name: str = "",
+    dm_name: str = "", dm_title: str = "", domain: str = "",
+    cache=None, use_llm: bool = True,
 ) -> Optional[Candidate]:
     """
     Pick the best candidate with a two-tier priority:
@@ -99,6 +101,40 @@ def pick_best(
                 )]
     if not eligible:
         return None
+
+    # LLM final-gate — one Haiku call that takes the candidate list + DM
+    # context and picks the best (or says NONE). Replaces the stopword
+    # treadmill. Cached per (dm, biz, domain, candidates) so re-runs are
+    # free. Falls through to rule-based walk when Haiku unavailable.
+    if use_llm and dm_name and cache is not None and eligible:
+        try:
+            from src.email_picker_llm import pick_email_with_llm
+            llm_result = pick_email_with_llm(
+                candidates=[{
+                    "email": c.email, "bucket": c.bucket,
+                    "pattern": c.pattern, "nb_result": c.nb_result,
+                } for c in eligible],
+                dm_name=dm_name, dm_title=dm_title,
+                business_name=business_name, domain=domain, cache=cache,
+            )
+            if llm_result is not None:
+                picked_email, _reason = llm_result
+                if picked_email is None:
+                    # Haiku says none of these reach the DM. Don't fall
+                    # through — trust the LLM over the walker. Signal
+                    # empty so the operator sees volume_empty, not a
+                    # wrong-person pick. Rule-based walker is the one
+                    # that historically picked bucket-C colleague emails.
+                    return None
+                # Match back to the Candidate object
+                for c in eligible:
+                    if c.email == picked_email:
+                        return c
+                # Pick doesn't match any candidate (shouldn't happen) —
+                # fall through to rule-based walker as safety net
+        except Exception:
+            # LLM layer is strictly additive; failures fall through
+            pass
 
     # Tier 1: any NB-valid? Prefer DM-match buckets, then bucket order.
     nb_valid = [c for c in eligible if c.nb_result == "valid"]

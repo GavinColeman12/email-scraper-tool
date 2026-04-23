@@ -33,6 +33,27 @@ GENERIC_LOCAL_PARTS = {
     # Finance
     "billing", "accounts", "accounting", "ap", "ar", "payments",
     "invoices", "invoicing", "orders", "shipping", "returns", "refunds",
+    # Restaurant / hospitality shared inboxes — catering@, management@,
+    # reservations@, specialevents@, gifts@ all auto-route to whoever
+    # is on front-of-house duty that day, not to the owner.
+    "catering", "cater", "reservations", "reservation",
+    "specialevents", "special-events", "privateevents", "private-events",
+    "events", "parties", "party", "groups", "group-sales",
+    "gifts", "gift", "giftcards", "giftcard", "vouchers",
+    "management", "managers", "gm", "ops", "operations",
+    "kitchen", "chef", "chefs", "dining", "foh", "boh",
+    "takeout", "delivery", "orders", "togo", "to-go",
+    "tickets", "ticketing", "rsvp",
+    # Accessibility / compliance — these are WCAG/ADA contact inboxes
+    "accessibility", "a11y", "ada", "wcag", "accommodations",
+    # "We are" style brand inboxes — weare@, hello-we-are@, us@
+    "weare", "we-are", "wearethe", "us", "theus", "allofus",
+    # Law-firm case-intake compounds the rules below might miss
+    "caseevaluation", "caseevaluations", "casereview", "casereviews",
+    "freeconsultation", "freeconsult", "freeevaluation",
+    "complimentarycasereview", "complimentaryconsultation",
+    "howcanwehelp", "wecanhelp", "canwehelp",
+    "contactanattorney", "talktoanattorney", "talktoalawyer",
     # HR
     "hr", "careers", "jobs", "recruiting", "recruitment", "hiring",
     # Legal / policy
@@ -94,6 +115,21 @@ PRACTICE_AREA_SUBSTRINGS = (
     "personalinjury", "carcrash", "caraccident",
     "intakemanager", "intakespecialist", "caseworker",
     "practicemanager", "officemanager", "officeadmin",
+    # Marketing / funnel locals — these phrase-compounds appear on a
+    # ton of law-firm sites as "casereview@", "freeconsultation@",
+    # "complimentarycasereview@", "howcanwehelp@", etc. If a local part
+    # contains any of these substrings it's a funnel inbox, not a DM.
+    "casereview", "caseevaluation", "caseintake", "freeconsult", "freeevaluation",
+    "complimentary", "consultation", "evaluation", "intakeform",
+    "newmatter", "howcanwehelp", "wecanhelp", "contactanattorney",
+    "talktoanattorney", "talktoalawyer", "speakwith",
+    # Restaurant marketing funnels
+    "privateevents", "specialevents", "bookaprivate", "bookatable",
+    "planyourevent", "hostyourevent", "cateringinquiries",
+    # Generic funnel
+    "contactform", "contactus", "getintouch", "workwithus",
+    "joinus", "applynow", "requestquote", "getquote", "getademo",
+    "bookademo", "schedulecall", "schedulemeeting",
 )
 
 
@@ -120,6 +156,20 @@ def is_generic(local_part: str, *, business_name: str = "") -> bool:
         return True
     if lp.isdigit():
         return True
+    # Venue/location-code prefix — e.g. "233thompson@", "90park@",
+    # "gct@" (Grand Central Terminal), "felice56@", "felice83@".
+    # Pattern: starts with 2+ digits followed by a word, OR is a short
+    # location acronym. These are shop-front aliases that auto-route to
+    # whatever manager happens to be on shift, not to the owner.
+    if len(lp) >= 4:
+        import re as _re_v
+        if _re_v.match(r"^\d{2,}[a-z]+$", lp):
+            return True
+        if _re_v.match(r"^[a-z]+\d{2,}$", lp) and len(_re_v.sub(r"\d", "", lp)) <= 8:
+            # "felice56", "store12" — brand + number. Longer brand-like
+            # locals (e.g. a real person "smith1990" is unlikely here)
+            # only flagged when the letter portion is short (≤8 chars).
+            return True
     # Placeholder / demo locals that shouldn't be picked
     for prefix in ("test", "demo", "sample", "example", "temp", "placeholder"):
         if lp.startswith(prefix):

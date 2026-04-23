@@ -146,6 +146,19 @@ def scrape_volume(
         result.evidence_trail["exit_reason"] = "no_domain"
         return result
 
+    # Bail if the Google Maps record points at a known redirector / URL
+    # shortener / listing aggregator (gtmaps.top, goo.gl, yelp.com, etc.).
+    # Building patterns on these produces bogus emails like
+    # sfaulkner@gtmaps.top that never existed. We flag the row and exit.
+    try:
+        from src.redirect_domains import is_redirect_domain
+        if is_redirect_domain(domain):
+            result.time_seconds = round(time.time() - t0, 2)
+            result.evidence_trail["exit_reason"] = f"redirect_domain:{domain}"
+            return result
+    except Exception:
+        pass
+
     business_name = business.get("business_name") or ""
     cache = get_cache()
 
@@ -556,8 +569,18 @@ def scrape_volume(
         if any(c.nb_result for c in candidates):
             result.agents_succeeded.append("neverbounce")
 
-    # ── Phase 8: Pick best_email via ranking walker ──
-    winner = pick_best(candidates, business_name=business_name)
+    # ── Phase 8: Pick best_email via ranking walker + LLM final gate ──
+    # The LLM gate takes the DM's name + the candidate list and picks
+    # the most likely DM mailbox, rejecting generic inboxes and
+    # wrong-person colleague emails that the rule-based walker used to
+    # miss. One cached Haiku call per biz, ~$0.001.
+    dm_name = result.decision_maker.full_name if result.decision_maker else ""
+    dm_title = getattr(result.decision_maker, "title", "") if result.decision_maker else ""
+    winner = pick_best(
+        candidates, business_name=business_name,
+        dm_name=dm_name, dm_title=dm_title,
+        domain=domain, cache=cache,
+    )
     tier = confidence_tier(winner)
     result.confidence_tier = tier
 
