@@ -592,8 +592,9 @@ if send_safe_only:
                         with st.expander(
                             f"📊 Learned patterns from your "
                             f"{lp['total_samples']} NB-valid sends — "
-                            "drives rescue priority per vertical"
+                            "drives rescue priority per vertical + CMS"
                         ):
+                            st.markdown("**By industry**")
                             verticals = lp["verticals_with_data"]
                             if verticals:
                                 for v, info in sorted(
@@ -613,6 +614,38 @@ if send_safe_only:
                                     "No vertical has 5+ samples yet — "
                                     "using hardcoded fallback order "
                                     "(flast, first, first.last)."
+                                )
+                            # CMS × pattern distribution (new — populated
+                            # as volume mode scrapes tag each row with
+                            # the detected CMS)
+                            cms_data = lp.get("cms_with_data") or {}
+                            if cms_data:
+                                st.markdown("**By CMS platform**")
+                                for cms, info in sorted(
+                                    cms_data.items(),
+                                    key=lambda x: -x[1]["samples"],
+                                ):
+                                    top = " · ".join(
+                                        f"**{p}** ({pct:.0f}%)"
+                                        for p, _, pct in info["top_3"]
+                                    )
+                                    # Show NB verdict distribution too
+                                    nb_dist = info.get("nb_verdicts") or {}
+                                    nb_str = " · ".join(
+                                        f"{v}:{c}" for v, c in sorted(
+                                            nb_dist.items(), key=lambda x: -x[1],
+                                        )
+                                    )
+                                    st.caption(
+                                        f"**{cms}** ({info['samples']} "
+                                        f"valid-samples) — {top}  \n"
+                                        f"  NB verdicts on this CMS: {nb_str}"
+                                    )
+                            else:
+                                st.caption(
+                                    "CMS data not yet captured — re-run "
+                                    "a scrape to start tagging rows by "
+                                    "platform."
                                 )
                 except Exception:
                     pass

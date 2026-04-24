@@ -175,6 +175,14 @@ def init_db() -> None:
             ("triangulation_confidence", "INTEGER"),
             ("triangulation_method", "TEXT"),
             ("email_safe_to_send", "INTEGER DEFAULT 0"),
+            # CMS / website-builder fingerprint — captured by
+            # src/cms_detector.py on the homepage HTML. Used by
+            # ranking.confidence_tier to interpret NB catchall
+            # verdicts, and by learned_priors to surface per-CMS
+            # pattern distribution.
+            ("cms", "TEXT"),                    # "wix", "wordpress", ...
+            ("cms_provider_hint", "TEXT"),      # "google_workspace", "platform_mailbox", ...
+            ("cms_catchall_hint", "TEXT"),      # "real", "suspect", "unknown"
         ]:
             try:
                 if USE_PG:
@@ -402,7 +410,10 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
                 triangulation_confidence = {_PARAM},
                 triangulation_method = {_PARAM},
                 email_safe_to_send = {_PARAM},
-                neverbounce_result = {_PARAM}
+                neverbounce_result = {_PARAM},
+                cms = {_PARAM},
+                cms_provider_hint = {_PARAM},
+                cms_catchall_hint = {_PARAM}
             WHERE id = {_PARAM}
         """
         cur.execute(sql, (
@@ -422,6 +433,9 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
             scrape_result.get("triangulation_method") or None,
             1 if scrape_result.get("email_safe_to_send") else 0,
             nb_val or None,
+            scrape_result.get("cms") or None,
+            scrape_result.get("cms_provider_hint") or None,
+            scrape_result.get("cms_catchall_hint") or None,
             business_id,
         ))
         conn.commit()

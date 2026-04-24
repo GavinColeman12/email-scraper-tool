@@ -152,6 +152,32 @@ def test_update_business_emails_parses_nb_from_email_source_fallback():
     assert "catchall" in params
 
 
+def test_update_business_emails_persists_cms_fields():
+    """New cms/cms_provider_hint/cms_catchall_hint columns get
+    written when the adapter emits them."""
+    from unittest.mock import patch, MagicMock
+    from src import storage
+
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    with patch.object(storage, "_connect", return_value=mock_conn), \
+         patch.object(storage, "_cursor", return_value=mock_cur), \
+         patch.object(storage, "init_db"):
+        storage.update_business_emails(1, {
+            "primary_email": "paula@firm.com",
+            "cms": "squarespace",
+            "cms_provider_hint": "google_workspace",
+            "cms_catchall_hint": "suspect",
+        })
+    sql, params = mock_cur.execute.call_args[0]
+    assert "cms" in sql.lower()
+    assert "cms_provider_hint" in sql.lower()
+    assert "cms_catchall_hint" in sql.lower()
+    assert "squarespace" in params
+    assert "google_workspace" in params
+    assert "suspect" in params
+
+
 def test_update_business_emails_stores_none_when_no_verdict():
     from unittest.mock import patch, MagicMock
     from src import storage

@@ -198,7 +198,8 @@ def compute_learned_priors(force_refresh: bool = False) -> dict:
         # because the pattern matching is richer than SQL.
         cur.execute("""
             SELECT primary_email, contact_name,
-                   business_type, neverbounce_result, email_source
+                   business_type, neverbounce_result, email_source,
+                   cms, cms_provider_hint, cms_catchall_hint
               FROM businesses
              WHERE primary_email IS NOT NULL AND primary_email <> ''
                AND contact_name IS NOT NULL AND contact_name <> ''
@@ -211,10 +212,24 @@ def compute_learned_priors(force_refresh: bool = False) -> dict:
 
     global_counts: dict[str, int] = {}
     vertical_counts: dict[str, dict[str, int]] = {}
+    # CMS cross-tabs — track pattern distribution per platform so we
+    # can surface "what's the top pattern for Wix vs Squarespace sites
+    # in the Dental vertical?"
+    cms_counts: dict[str, dict[str, int]] = {}
+    # Also track NB verdict distribution per CMS — feeds the
+    # "catchall on Wix = expected, catchall on Squarespace = suspect"
+    # interpretation layer.
+    cms_nb_counts: dict[str, dict[str, int]] = {}
 
     for raw in rows:
         row = dict(raw) if hasattr(raw, "keys") else dict(raw)
-        if _nb_verdict_of(row) != "valid":
+        verdict = _nb_verdict_of(row)
+        cms = (row.get("cms") or "").lower().strip()
+        if cms and verdict:
+            cms_nb_counts.setdefault(cms, {})[verdict] = (
+                cms_nb_counts.setdefault(cms, {}).get(verdict, 0) + 1
+            )
+        if verdict != "valid":
             continue
         first, last = _first_last_of(row)
         pattern = classify_pattern(
@@ -226,6 +241,9 @@ def compute_learned_priors(force_refresh: bool = False) -> dict:
         global_counts[pattern] = global_counts.get(pattern, 0) + 1
         vc = vertical_counts.setdefault(vertical, {})
         vc[pattern] = vc.get(pattern, 0) + 1
+        if cms:
+            cc = cms_counts.setdefault(cms, {})
+            cc[pattern] = cc.get(pattern, 0) + 1
 
     total = sum(global_counts.values())
 
@@ -239,6 +257,11 @@ def compute_learned_priors(force_refresh: bool = False) -> dict:
     priors = {
         "global": _rank(global_counts),
         "by_vertical": {v: _rank(c) for v, c in vertical_counts.items()},
+        "by_cms": {cms: _rank(c) for cms, c in cms_counts.items()},
+        "cms_nb_distribution": {
+            cms: {v: c for v, c in counts.items()}
+            for cms, counts in cms_nb_counts.items()
+        },
         "total_samples": total,
     }
     _CACHE["priors"] = priors
@@ -269,8 +292,8 @@ def top_patterns_for_vertical(
 
 def summarize_for_ui() -> dict:
     """Compact dict for the Pattern Learning page / rescue UI —
-    shows total sample count + the per-vertical rankings in a
-    readable shape."""
+    shows total sample count + the per-vertical + per-CMS rankings
+    in a readable shape."""
     priors = compute_learned_priors()
     return {
         "total_samples": priors["total_samples"],
@@ -281,6 +304,15 @@ def summarize_for_ui() -> dict:
                 "top_3": rows[:3],
             }
             for v, rows in priors["by_vertical"].items()
+            if sum(c for _, c, _ in rows) >= MIN_SAMPLES_PER_VERTICAL
+        },
+        "cms_with_data": {
+            cms: {
+                "samples": sum(c for _, c, _ in rows),
+                "top_3": rows[:3],
+                "nb_verdicts": priors["cms_nb_distribution"].get(cms, {}),
+            }
+            for cms, rows in priors["by_cms"].items()
             if sum(c for _, c, _ in rows) >= MIN_SAMPLES_PER_VERTICAL
         },
     }

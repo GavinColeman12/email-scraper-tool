@@ -622,6 +622,17 @@ def scrape_volume(
     if use_neverbounce:
         result.agents_run.append("neverbounce")
         NB_BUDGET = 4
+        # CMS-aware NB budget cut. Wix/Weebly/Duda/Shopify host mail
+        # via their own platform which is effectively always catch-all
+        # — NB will return "catchall" for almost any local part we
+        # guess. Verifying bucket-D (industry prior) candidates on
+        # these platforms burns budget on a foregone conclusion.
+        # Skip the bucket-D guesses and only NB scraped addresses
+        # (buckets a + c), which IS informative (real mailbox that
+        # appeared on the live site).
+        cms_info = result.evidence_trail.get("cms") or {}
+        platform_mailbox_cms = cms_info.get("catchall_hint") == "real"
+
         # Priority for NB verification: DM-matching buckets first (a, b, d),
         # then scraped-other (c), then universal fallback (e). This is
         # DIFFERENT from the ranking walk — here we just want to ensure
@@ -634,6 +645,7 @@ def scrape_volume(
 
         to_verify = sorted(candidates, key=_verify_priority)
         nb_used = 0
+        nb_skipped_cms = 0
         found_valid = False
         for cand in to_verify:
             if nb_used >= NB_BUDGET:
@@ -644,6 +656,16 @@ def scrape_volume(
                 break
             # Skip if already NB'd (shouldn't happen, defence-in-depth)
             if cand.nb_result is not None:
+                continue
+            # CMS skip: on platform-mailbox CMSes (Wix / Weebly / Duda
+            # / Shopify / GoDaddy Builder), bucket-D/E guesses will
+            # almost always NB as catchall. Save the call — mark as
+            # 'catchall' via the CMS signal and move on. Scraped
+            # emails (a / c) still get verified since they're
+            # informative ground truth.
+            if platform_mailbox_cms and cand.bucket in ("d", "e"):
+                cand.nb_result = "catchall"
+                nb_skipped_cms += 1
                 continue
             try:
                 nb = _nb_verify_cached(cand.email, cache)
@@ -660,6 +682,8 @@ def scrape_volume(
                 break
         if any(c.nb_result for c in candidates):
             result.agents_succeeded.append("neverbounce")
+        if nb_skipped_cms:
+            result.evidence_trail["nb_skipped_cms"] = nb_skipped_cms
 
     # ── Phase 8: Pick best_email via ranking walker + LLM final gate ──
     # The LLM gate takes the DM's name + the candidate list and picks
@@ -948,4 +972,12 @@ def volume_result_to_scrape_result(result: VolumeResult, business: dict) -> dict
         # top_nb is the NB verdict on the winning email; normalized to
         # the same shape the storage UPDATE expects.
         "neverbounce_result": (top_nb or "").lower() or None,
+        # CMS fingerprint — populated by the free_signals phase earlier
+        # in this pipeline from detect_cms() on the homepage HTML.
+        # Lifted from evidence_trail into dedicated columns so queries
+        # can filter by CMS and learned_priors can cross-tab per
+        # platform.
+        "cms": (result.evidence_trail.get("cms") or {}).get("cms"),
+        "cms_provider_hint": (result.evidence_trail.get("cms") or {}).get("provider_hint"),
+        "cms_catchall_hint": (result.evidence_trail.get("cms") or {}).get("catchall_hint"),
     }
