@@ -217,6 +217,102 @@ if filtered:
         mime="text/csv",
     )
 
+    # ── Send-safety split export — enterprise-grade <0.3% bounce target ──
+    # Classifies each row into send / reverify / review / skip using the
+    # same strict gate as the Ranked Leads toggle. Ships three separate
+    # files so operators can put them into different sending queues:
+    #   send_safe       → ready to send today, at the target bounce rate
+    #   reverify        → NB is stale (>14d); re-scrape before sending
+    #   review          → ambiguous (catchall / NB unknown / low rating)
+    #   do_not_send     → confirmed unsafe (NB invalid / domain bounced)
+    st.markdown("---")
+    st.markdown("### 🛡️ Send-safety split (target <0.3% bounce)")
+    st.caption(
+        "Same strict gate as the Ranked Leads toggle. Splits your "
+        "filtered set into four send-readiness queues so each can "
+        "go into the right downstream workflow."
+    )
+
+    try:
+        from src.send_safety import (
+            classify_for_send, domains_with_bounces, is_safe_to_send,
+        )
+        bounce_domains = domains_with_bounces()
+
+        # Classify every filtered biz against its DB row. build_rows
+        # already pulled from `filtered` so we can classify that
+        # directly for send-safety.
+        buckets: dict[str, list[dict]] = {
+            "send": [], "reverify": [], "review": [], "skip": [],
+        }
+        row_reasons: dict[int, list[str]] = {}
+        for b in filtered:
+            bucket = classify_for_send(b, domain_bounce_set=bounce_domains)
+            buckets[bucket].append(b)
+            _, reasons = is_safe_to_send(b, domain_bounce_set=bounce_domains)
+            if reasons:
+                row_reasons[b.get("id")] = reasons
+
+        # Four summary metrics
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric("🟢 Send safe",  len(buckets["send"]),
+                   help="All gates pass — add to today's send batch")
+        sm2.metric("🔁 Re-verify",  len(buckets["reverify"]),
+                   help="NB verdict is >14d stale — re-scrape before sending")
+        sm3.metric("🟡 Review",     len(buckets["review"]),
+                   help="NB catchall / unknown / low rating — manual check first")
+        sm4.metric("🔴 Do not send", len(buckets["skip"]),
+                   help="NB invalid or domain has prior bounces — do not send")
+
+        # Export each non-empty bucket as a separate CSV
+        def _export_bucket(label: str, bucket_name: str, biz_list: list[dict],
+                            emoji: str):
+            if not biz_list:
+                return
+            # Re-run through build_rows so schema matches the main export
+            rows = build_rows(biz_list)
+            bucket_df = pd.DataFrame(rows)
+            if bucket_df.empty:
+                return
+            # Attach reason column for non-safe buckets
+            if bucket_name != "send":
+                bucket_df["Send-safe reasons"] = [
+                    " | ".join(row_reasons.get(b.get("id"), []))
+                    for b in biz_list
+                ]
+            out_buf = io.StringIO()
+            bucket_df.to_csv(out_buf, index=False)
+            st.download_button(
+                f"{emoji} Download {len(bucket_df)} — {label}",
+                data=out_buf.getvalue(),
+                file_name=f"{bucket_name}_search_{search_id}.csv",
+                mime="text/csv",
+                key=f"dl_{bucket_name}_{search_id}",
+            )
+
+        _export_bucket("send-safe (ready today)", "send_safe",
+                       buckets["send"], "🟢")
+        _export_bucket("re-verify (stale NB)", "reverify",
+                       buckets["reverify"], "🔁")
+        _export_bucket("review (manual check)", "review",
+                       buckets["review"], "🟡")
+        _export_bucket("do-not-send (confirmed unsafe)", "do_not_send",
+                       buckets["skip"], "🔴")
+
+        if buckets["send"] and len(buckets["send"]) == len(filtered):
+            st.success(
+                f"✅ All {len(filtered)} rows pass the send-safety gate. "
+                "Download the send-safe CSV above and schedule for today's batch."
+            )
+        elif not buckets["send"]:
+            st.warning(
+                "⚠️ Zero rows pass the strict send-safety gate. Loosen "
+                "filters in the left sidebar, or re-scrape the set to "
+                "refresh stale NB verdicts."
+            )
+    except Exception as e:
+        st.warning(f"Send-safety split failed: {e}")
+
     # Apollo-format CSV was removed — it silently dropped the
     # triangulation evidence (Place ID, Professional IDs, Score/Tier,
     # Confidence, Email Source/Status), losing ~$5/business of enrichment

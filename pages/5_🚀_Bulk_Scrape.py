@@ -387,6 +387,51 @@ if not scraped:
     st.info("No scraped businesses yet. Run a bulk scrape above.")
     st.stop()
 
+# ── Warmup banner — shows daily cap + today's send count for new senders ──
+try:
+    from src.send_safety import (
+        sender_first_send_date, recommended_daily_cap, sent_today_count,
+    )
+    first_send = sender_first_send_date()
+    cap_info = recommended_daily_cap(first_send)
+    sent_today = sent_today_count()
+    remaining = max(0, cap_info["cap"] - sent_today)
+    over_cap = sent_today > cap_info["cap"]
+
+    wb1, wb2, wb3 = st.columns([2, 2, 3])
+    wb1.metric(
+        "Today's send cap",
+        f"{cap_info['cap']}/day",
+        help=(
+            f"Week {cap_info['week']} of warmup · {cap_info['stage']}.\n\n"
+            "Warmup protects sender reputation by gradually increasing "
+            "daily volume. Sending over the cap on a new domain risks "
+            "ISP throttling + bounces that damage deliverability for "
+            "months."
+        ),
+    )
+    wb2.metric(
+        "Sent today",
+        f"{sent_today}",
+        delta=(f"{remaining} remaining" if not over_cap
+               else f"{sent_today - cap_info['cap']} OVER cap"),
+        delta_color=("normal" if not over_cap else "inverse"),
+    )
+    if over_cap:
+        wb3.error(
+            "⚠️ Over your warmup cap today. Pause sending until tomorrow — "
+            "pushing past the cap on a new sender domain is the single "
+            "biggest cause of sub-0.3% bounce targets failing in the first "
+            "month."
+        )
+    elif cap_info["next_bump_in_days"] is not None and cap_info["next_bump_in_days"] <= 7:
+        wb3.info(
+            f"📅 Cap bumps in {cap_info['next_bump_in_days']} days "
+            f"(stage: {cap_info['stage']})."
+        )
+except Exception:
+    pass
+
 # ── Rescore-only button (fixes empty Score/Tier without re-scraping) ──
 rs_col1, rs_col2 = st.columns([3, 1])
 with rs_col1:
@@ -432,6 +477,35 @@ with f3:
 with f4:
     min_rating = st.number_input("Min Google rating", 0.0, 5.0, 0.0, step=0.1)
 
+# ── Strict "Send Safe" gate — enterprise-grade <0.3% bounce target ──
+# Composes: NB=valid + MX + fresh verdict + no domain bounce history +
+# rating ≥ 3.0 + pipeline safe_to_send flag. When ON, hides every row
+# that fails any of these. See src/send_safety.py for the full logic.
+ss1, ss2 = st.columns([3, 2])
+with ss1:
+    send_safe_only = st.toggle(
+        "🛡️ Send-safe only (target <0.3% bounce)",
+        value=True,
+        help=(
+            "Strict gate that composes every deliverability signal:\n"
+            "• NB verdict must be 'valid' (rejects catchall/unknown/invalid)\n"
+            "• NB verdict must be <14 days old (rescrape stale rows)\n"
+            "• Domain must not have prior bounces in your send history\n"
+            "• Google rating ≥ 3.0 with ≥1 review\n"
+            "• Pipeline safe_to_send flag set\n\n"
+            "Turn OFF for wider nets at higher bounce risk. Recommended "
+            "ON for new sender domains and enterprise-grade bounce targets."
+        ),
+    )
+with ss2:
+    permissive_mode = st.checkbox(
+        "Permissive (skip freshness + rating gates)",
+        value=False,
+        disabled=not send_safe_only,
+        help="Keep NB-valid + no-bounce-history gates but relax the "
+             "stale-NB and rating checks. Expect ~1% bounce at this setting.",
+    )
+
 filtered = [
     b for b in ranked
     if b.get("lead_quality_score", 0) >= min_score
@@ -439,6 +513,45 @@ filtered = [
     and (b.get("confidence", "") in conf_filter or not b.get("confidence"))
     and (b.get("rating") or 0) >= min_rating
 ]
+
+# Apply the strict send-safety gate on top of the regular filters
+if send_safe_only:
+    try:
+        from src.send_safety import is_safe_to_send, domains_with_bounces
+        bounce_domains = domains_with_bounces()
+        safe_filtered = []
+        unsafe_count = 0
+        unsafe_reasons_tally: dict[str, int] = {}
+        for b in filtered:
+            safe, reasons = is_safe_to_send(
+                b, domain_bounce_set=bounce_domains,
+                permissive=permissive_mode,
+            )
+            if safe:
+                safe_filtered.append(b)
+            else:
+                unsafe_count += 1
+                for r in reasons:
+                    # Bucket reasons by their prefix so the UI
+                    # summary stays readable (e.g. count all
+                    # "NB catchall" regardless of the full text).
+                    key = r.split(" — ")[0].split(" (")[0].strip()
+                    unsafe_reasons_tally[key] = unsafe_reasons_tally.get(key, 0) + 1
+        filtered = safe_filtered
+        if unsafe_count:
+            tally_str = " · ".join(
+                f"**{c}** × {reason}"
+                for reason, c in sorted(
+                    unsafe_reasons_tally.items(),
+                    key=lambda x: -x[1],
+                )[:5]
+            )
+            st.caption(
+                f"🛡️ Send-safe gate held back **{unsafe_count}** rows. "
+                f"Top reasons: {tally_str}"
+            )
+    except Exception as e:
+        st.warning(f"Send-safe gate failed to apply: {e}")
 
 # If the combined filter knocks everything out, show which knob dropped what
 # so the user knows which threshold to loosen. Otherwise "No leads pass"
