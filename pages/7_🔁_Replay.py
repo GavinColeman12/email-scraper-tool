@@ -25,11 +25,11 @@ from scripts.replay_search import run_replay, REPLAY_MODES
 
 # Short human descriptions for each mode (used in the selector help text).
 MODE_HELP = {
-    "volume":        "🚀 Volume — deep crawl + Wayback + selective NB (~30s/biz, <$4/200, never picks info@). Use for mass outreach.",
-    "triangulation": "🎯 Triangulation — 5 parallel agents + NPI + NB gate (~45s/biz, ~$5-6/100). Use for high-stakes.",
-    "deep":          "🧠 Deep — 4 agents + Sonnet + SMTP (~10s/biz, ~$2/200, <2% bounce).",
-    "verified":      "✅ Verified — rules + Haiku fallback + SMTP (~6s/biz, ~$0.30/200).",
-    "basic":         "⚡ Basic — rules + SMTP only (~5s/biz, free, <5% bounce).",
+    "volume":        "🚀 Volume (RECOMMENDED) — crawl + Wayback + NPI + NB (~30s/biz, <$4/200).",
+    "basic":         "⚡ Basic — rules + SMTP only (~5s/biz, free).",
+    "verified":      "✅ Verified — rules + Haiku + SMTP (~6s/biz, ~$0.30/200).",
+    "deep":          "🧠 Deep — 4 agents + Sonnet + SMTP (~10s/biz, ~$2/200).",
+    "triangulation": "⚠️ Triangulation (DEPRECATED) — 5 agents, ~$5-6/100 (5× volume's cost).",
 }
 
 

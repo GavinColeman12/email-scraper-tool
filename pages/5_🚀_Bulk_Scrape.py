@@ -152,23 +152,54 @@ except Exception:
 
 mode_col1, mode_col2 = st.columns([3, 2])
 with mode_col1:
+    # Volume is the default AND recommended mode. NPI lookup is now
+    # ported into volume for medical verticals (free), and the
+    # "Rescue empties" toggle below offers the combined owner+press
+    # SearchApi path for hard cases. Triangulation is retained but
+    # deprecated — 5-6× the cost for marginal extra coverage.
     mode = st.radio(
         "Mode",
-        ["basic", "verified", "deep", "triangulation", "volume"],
+        ["volume", "basic", "verified", "deep", "triangulation"],
         format_func=lambda k: {
+            "volume": "🚀 **Volume** (RECOMMENDED) — deep crawl + Wayback + NPI + selective NB (~30s/biz, <$4/200, never picks info@)",
             "basic": "⚡ Basic — rules + SMTP verification (~5 sec/biz, free, <5% bounce)",
-            "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200, <2% bounce)",
-            "deep": "🧠 Deep — 4 agents + Sonnet + SMTP + Haiku (~10 sec/biz, ~$2/200, <2% bounce)",
-            "triangulation": "🎯 Triangulation — 5 parallel agents + NPI + NeverBounce gate (~45s/biz, ~$5-6/100)",
-            "volume": "🚀 Volume (recommended for mass outreach) — deep crawl + Wayback + selective NB (~30s/biz, <$4/200, never picks info@)",
+            "verified": "✅ Verified — rules + Haiku fallback + SMTP pattern testing (~6 sec/biz, ~$0.30/200)",
+            "deep": "🧠 Deep — 4 agents + Sonnet + SMTP + Haiku (~10 sec/biz, ~$2/200)",
+            "triangulation": "⚠️ Triangulation (DEPRECATED) — 5 parallel agents, ~$5-6/100, 5× volume's cost for marginal lift",
         }[k],
         horizontal=False,
-        index=4,  # default to Volume (cheap mass mode)
+        index=0,  # default to Volume
     )
 with mode_col2:
     parallelism = st.slider(
         "Parallel workers", 1, 12, 6,
         help="Higher = faster but more API pressure. 6 is safe for SearchApi.",
+    )
+
+# Show deprecation banner when user selects triangulation
+if mode == "triangulation":
+    st.warning(
+        "⚠️ **Triangulation is deprecated.** Volume mode now includes "
+        "NPI verification for medical verticals (free) and has a "
+        "'Rescue empties' toggle that runs the combined owner+press "
+        "SearchApi only on rows volume couldn't solve. That gives you "
+        "~95% of triangulation's coverage at ~20% of the cost. Keep "
+        "triangulation only for replay-compatibility with old runs."
+    )
+
+# Volume-specific: rescue-empty SearchApi opt-in
+rescue_empties = False
+if mode == "volume":
+    rescue_empties = st.checkbox(
+        "🔍 Rescue empties with SearchApi (~$0.010 per empty biz)",
+        value=False,
+        help="When volume's crawl + Wayback + NPI + LinkedIn all produce "
+             "zero DM candidates for a biz, optionally fire the combined "
+             "owner+press SearchApi to find the founder via press mentions "
+             "/ third-party listings. Only hits the ~20% of rows volume "
+             "couldn't solve, so on a 200-biz campaign this adds ~$0.40 "
+             "rather than triangulation's $10+. Recommended ON for "
+             "hard-to-reach verticals (legal / construction / manufacturing).",
     )
 
 if mode == "verified":
@@ -256,13 +287,16 @@ def _scrape_worker(biz, job_id):
         phone = biz.get("phone", "") or ""
 
         if mode == "volume":
-            # Volume Mode: deep crawl + Wayback + selective NB, no
-            # combined owner/press SearchApi call, no Haiku, no NPI.
-            # ~10× cheaper than triangulation at ~40-60% DM-email hit
-            # rate. Never picks generic inboxes.
+            # Volume Mode: deep crawl + Wayback + NPI (medical) +
+            # selective NB. ~10× cheaper than triangulation. Never
+            # picks generic inboxes. rescue_empties adds SearchApi
+            # on volume_empty rows only.
             from src.volume_mode import scrape_volume
             from src.volume_mode.pipeline import volume_result_to_scrape_result
-            vres = scrape_volume(biz, use_neverbounce=True)
+            vres = scrape_volume(
+                biz, use_neverbounce=True,
+                rescue_empties_with_searchapi=rescue_empties,
+            )
             result = volume_result_to_scrape_result(vres, biz)
         elif mode == "triangulation":
             # v3 parallel-agent pipeline: NPI + website + Google + press

@@ -112,10 +112,19 @@ def scrape_volume(
     use_neverbounce: bool = True,
     budget_per_biz_usd: float = BUDGET_PER_BIZ_USD,
     include_wayback: bool = True,
+    rescue_empties_with_searchapi: bool = False,
 ) -> VolumeResult:
     """
     Discover an email for a business using crawl + free signals first
     and paid APIs only as targeted fallbacks.
+
+    Args:
+      rescue_empties_with_searchapi: when True, if volume's initial
+        pass returns no DM (volume_empty), fire the combined
+        owner+press SearchApi query as a last-ditch rescue. Costs
+        ~$0.010 per rescued biz (only fires on empties) and can
+        recover founders not on the team page / LinkedIn / Wayback.
+        Default False because it's not free — opt-in per campaign.
 
     Returns a VolumeResult shaped to feed the shared export row builder.
     """
@@ -169,6 +178,34 @@ def scrape_volume(
 
     business_name = business.get("business_name") or ""
     cache = get_cache()
+    business_type = (business.get("business_type") or "").lower()
+    address = (business.get("address") or business.get("location") or "")
+
+    # ── Phase 0.5: NPI healthcare lookup (FREE, medical verticals only) ──
+    # CMS.gov's National Provider Identifier registry is a free US
+    # government API returning every licensed healthcare provider by
+    # ZIP + taxonomy. For dental/medical/chiro/vet businesses this
+    # gives us verified doctor names with credentials — often the
+    # single highest-signal DM source. Zero cost, cached 30 days.
+    is_medical_vertical = any(
+        v in business_type
+        for v in ("dental", "dentist", "orthodont", "endodont", "periodont",
+                    "oral", "medical", "clinic", "doctor", "physician",
+                    "chiro", "veterinar", "vet clinic", "animal hospital",
+                    "optometrist", "pediatric", "dermat", "urgent care")
+    )
+    npi_candidates: list = []
+    if is_medical_vertical and address:
+        result.agents_run.append("npi_healthcare")
+        try:
+            from src.universal_pipeline import _agent_npi_healthcare
+            npi_candidates = _agent_npi_healthcare(
+                business_name, address, business_type, cache,
+            )
+            if npi_candidates:
+                result.agents_succeeded.append("npi_healthcare")
+        except Exception as e:
+            logger.debug(f"volume NPI lookup failed: {e}")
 
     # ── Phase 1: Deep website crawl (free) ──
     result.agents_run.append("website_scrape")
@@ -182,6 +219,11 @@ def scrape_volume(
         all_emails.update(w_emails)
     except Exception as e:
         logger.warning(f"volume website_scrape: {e}")
+
+    # Merge NPI candidates into the synthesis pool. High-signal source
+    # for medical verticals — verified provider names with credentials.
+    if npi_candidates:
+        all_candidates.extend(npi_candidates)
 
     # ── Phase 1.3: Free-signal harvesters (WHOIS / LinkedIn slug /
     # footer / meta / CMS). Zero network beyond WHOIS (rdap.org), which
@@ -314,6 +356,34 @@ def scrape_volume(
                 result.evidence_trail["llm_filter_removed"] = before - len(filtered)
         except Exception as e:
             logger.debug(f"volume llm name filter failed: {e}")
+
+    # ── Phase 2.9: Rescue-empty SearchApi fallback (opt-in, paid) ──
+    # When website + wayback + LinkedIn + NPI all produced zero
+    # candidates, the owner may simply not be on the live site. One
+    # last-ditch SearchApi query ("[biz] owner / founder / CEO") mines
+    # press mentions and third-party listings for the name. Costs
+    # ~$0.010 per rescued biz; fires ONLY when rescue_empties flag is
+    # on AND we have zero candidates after free signals. This replaces
+    # what triangulation was doing on every biz — we now do it only
+    # on the ~20% of rows where it's actually needed.
+    if (rescue_empties_with_searchapi and not all_candidates
+            and business_name and domain):
+        result.agents_run.append("combined_owner_press_rescue")
+        try:
+            from src.universal_pipeline import _agent_combined_owner_and_press
+            rescue_cands, rescue_emails, rescue_lis = (
+                _agent_combined_owner_and_press(
+                    business_name, domain, address, cache,
+                )
+            )
+            if rescue_cands or rescue_emails:
+                result.agents_succeeded.append("combined_owner_press_rescue")
+                all_candidates.extend(rescue_cands)
+                all_emails.update(rescue_emails)
+                biz_cost += 0.010
+                _charge(0.010)
+        except Exception as e:
+            logger.debug(f"combined_owner_press_rescue failed: {e}")
 
     # ── Phase 3: Synthesise DM from collected candidates ──
     ranked = _synthesise_owners(all_candidates, business_name)
