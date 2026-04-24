@@ -69,6 +69,130 @@ def _domain_of(email: str) -> str:
     return email.split("@", 1)[1].lower().strip()
 
 
+def _local_of(email: str) -> str:
+    if not email or "@" not in email:
+        return ""
+    return email.split("@", 1)[0].lower().strip()
+
+
+def _local_contains_dm_name(
+    email: str, dm_first: str, dm_last: str,
+) -> bool:
+    """
+    True if the email local part plausibly belongs to the identified DM.
+    Covers: exact name match, nickname equivalence (Jeff ↔ Jeffrey),
+    "dr" prefix (dr{last} is common in dental/medical), first-initial
+    + last, last-initial, and short-form initials.
+
+    Returns FALSE when the local part doesn't contain the DM's name —
+    a strong signal that either (a) the email is a shared inbox or
+    (b) it belongs to a different person at the company. Either way,
+    risky for <0.3% bounce rate targets.
+    """
+    if not email or "@" not in email:
+        return False
+    local = _local_of(email)
+    if not local:
+        return False
+    first = (dm_first or "").lower().strip()
+    last = (dm_last or "").lower().strip()
+    if not first and not last:
+        # No DM info to match against — can't evaluate
+        return False
+
+    # Strict word-boundary check — prevents "bill" (nickname for
+    # William) from matching inside "patientBILLing". A match counts
+    # only when the needle is at the start of local, end of local, or
+    # flanked by separators (. - _).
+    def _boundary_match(needle: str) -> bool:
+        if not needle or len(needle) < 3 or needle not in local:
+            return False
+        # OK if at start and followed by end-of-local or separator
+        if local.startswith(needle):
+            rest_start = len(needle)
+            if rest_start == len(local):
+                return True  # exact match
+            if local[rest_start] in "._-":
+                return True
+            # e.g. "jeff" + "erson" still counts when the local is the
+            # full first name (handled above); flast patterns below.
+        # OK if at end and preceded by end-of-local or separator
+        if local.endswith(needle):
+            lhs_end = len(local) - len(needle)
+            if lhs_end == 0:
+                return True
+            if local[lhs_end - 1] in "._-":
+                return True
+        # Flanked by separators
+        idx = local.find(needle)
+        while idx != -1:
+            left_ok = idx == 0 or local[idx - 1] in "._-"
+            right_end = idx + len(needle)
+            right_ok = right_end == len(local) or local[right_end] in "._-"
+            if left_ok and right_ok:
+                return True
+            idx = local.find(needle, idx + 1)
+        return False
+
+    # Direct name match (strict boundaries)
+    if _boundary_match(first):
+        return True
+    if _boundary_match(last):
+        return True
+
+    # Nickname equivalents (Jeff ↔ Jeffrey, Mike ↔ Michael, Bill ↔
+    # William). Boundary-checked so "bill" doesn't match
+    # "patientbilling".
+    try:
+        from src.name_equivalence import equivalents
+        if first:
+            for nick in equivalents(first):
+                if _boundary_match(nick):
+                    return True
+    except Exception:
+        pass
+
+    # Initial + last-name patterns: flast, f.last, firstl. These are
+    # naturally boundary-anchored because they span most of the local.
+    if first and last and len(last) >= 3:
+        if local == first[0] + last:       # pwyatt
+            return True
+        if local == first[0] + "." + last: # p.wyatt
+            return True
+        if local == first + last[0]:       # paulaw
+            return True
+        # Allow flast as a prefix only when followed by separator
+        prefix = first[0] + last
+        if local.startswith(prefix) and (
+            len(local) == len(prefix) or local[len(prefix)] in "._-"
+        ):
+            return True
+
+    # Doctor prefix — common in dental/medical: dr{last}, dr.{last}
+    if last and len(last) >= 3:
+        for dp in ("dr", "doctor", "doc"):
+            # Exact: "drwyatt" == "dr" + "wyatt" or "dr.wyatt"
+            if local == dp + last:
+                return True
+            if local == dp + "." + last:
+                return True
+            # Prefix: "drwyatt@" at the start of local
+            if local.startswith(dp + last):
+                rest = local[len(dp + last):]
+                if not rest or rest[0] in "._-":
+                    return True
+
+    # Three-letter initials (Jeffrey R. Buhrman → jrb)
+    if first and last:
+        fl = first[0] + last[0]
+        if local == fl:
+            return True
+        if len(local) == 3 and local[0] == first[0] and local[-1] == last[0]:
+            return True
+
+    return False
+
+
 def is_safe_to_send(
     biz: dict,
     *,
@@ -149,7 +273,56 @@ def is_safe_to_send(
     if pipeline_safe is not None and not pipeline_safe:
         reasons.append("pipeline safe_to_send=false")
 
+    # 6. DM-name-match gate — local part must plausibly contain the
+    # identified DM's name. Catches the search-45 failure class where
+    # Haiku picked a bucket-C NB-valid scraped email (hba@, manager@,
+    # patientbilling@, civilrights@) because all the DM patterns came
+    # back NB-invalid. NB-valid + non-DM-match = a shared inbox or a
+    # different person; neither is acceptable at <0.3% bounce.
+    if not permissive:
+        dm_first = (biz.get("contact_first") or biz.get("first_name") or "").strip()
+        dm_last = (biz.get("contact_last") or biz.get("last_name") or "").strip()
+        # Fall back to splitting contact_name when the separate columns
+        # aren't populated (older rows, some export paths).
+        if not dm_first and not dm_last:
+            full = (biz.get("contact_name") or "").strip()
+            if full:
+                parts = full.split(None, 1)
+                dm_first = parts[0] if parts else ""
+                dm_last = parts[1] if len(parts) > 1 else ""
+        if dm_first or dm_last:
+            if not _local_contains_dm_name(email, dm_first, dm_last):
+                reasons.append(
+                    f"local part doesn't match DM name "
+                    f"({dm_first} {dm_last}) — likely shared inbox "
+                    f"or wrong person"
+                )
+
     return (len(reasons) == 0, reasons)
+
+
+def mark_duplicate_emails(businesses: list[dict]) -> dict:
+    """
+    Given a list of business rows, return a dict
+    {biz_id: duplicate_index} where duplicate_index is:
+      0 — first occurrence of this email in the list (safe to send)
+      1, 2, ... — later occurrences (duplicate — skip to avoid
+                  double-sending the same person)
+
+    Use case: search #45 had `mohammad.spouh@aspendental.com` on two
+    Aspen Dental franchise locations. Same person, two rows — sending
+    twice hits the spam-signal threshold at big ESPs.
+    """
+    seen_count: dict[str, int] = {}
+    out: dict = {}
+    for biz in businesses:
+        email = (biz.get("primary_email") or "").strip().lower()
+        if not email:
+            continue
+        idx = seen_count.get(email, 0)
+        out[biz.get("id")] = idx
+        seen_count[email] = idx + 1
+    return out
 
 
 def classify_for_send(
@@ -169,6 +342,12 @@ def classify_for_send(
     joined = " | ".join(reasons).lower()
     if "nb invalid" in joined or "prior bounces" in joined:
         return "skip"
+    # DM-name mismatch = "wrong person or shared inbox" — goes to
+    # review for human check, not skip. The mailbox may still deliver
+    # (e.g. manager@ reaches someone at the practice) but shouldn't
+    # be auto-sent without looking.
+    if "doesn't match dm name" in joined:
+        return "review"
     if "stale" in joined and not ("catchall" in joined or "invalid" in joined):
         return "reverify"
     return "review"

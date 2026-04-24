@@ -226,3 +226,164 @@ def test_domain_of_basic():
     assert _domain_of("Foo@Bar.COM") == "bar.com"
     assert _domain_of("not-an-email") == ""
     assert _domain_of("") == ""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# DM-name-match gate — the search-45 dental leaks
+# ──────────────────────────────────────────────────────────────────────
+
+from src.send_safety import _local_contains_dm_name, mark_duplicate_emails
+
+
+@pytest.mark.parametrize("email,first,last,expected", [
+    # Direct name matches
+    ("paula.wyatt@firm.com", "Paula", "Wyatt", True),
+    ("pwyatt@firm.com", "Paula", "Wyatt", True),      # {f}{last}
+    ("paulaw@firm.com", "Paula", "Wyatt", True),      # {first}{l}
+    ("drwyatt@firm.com", "Paula", "Wyatt", True),     # dr{last} dental pattern
+    # Nickname equivalents
+    ("jeff.buhrman@firm.com", "Jeffrey", "Buhrman", True),  # Jeff ↔ Jeffrey
+    ("mike.crow@firm.com", "Michael", "Crow", True),        # Mike ↔ Michael
+    # Search-45 failures that name-match catches:
+    ("hba@emergencydental.com", "Diana", "Giblette", False),
+    ("civilrights@dtcc.edu", "David", "Wachsman", False),
+    ("manager@dentistnearmeep.com", "Michel", "Kuri", False),
+    ("patientbilling@mydrdental.com", "William", "Cote", False),
+    # Short last names should not produce false positives
+    ("abc@foo.com", "Sarah", "Lu", False),
+    # Empty DM info → False (can't evaluate)
+    ("anyone@foo.com", "", "", False),
+])
+def test_local_contains_dm_name(email, first, last, expected):
+    assert _local_contains_dm_name(email, first, last) == expected
+
+
+def test_safe_to_send_rejects_wrong_person_email():
+    """Search 45, row 3: hba@emergencydental.com, DM=Diana Giblette.
+    NB-valid + scraped from website but local doesn't contain Diana's
+    name — classic shared-inbox or wrong-person trap."""
+    biz = _biz(
+        primary_email="hba@emergencydental.com",
+        contact_name="Diana Giblette",
+    )
+    safe, reasons = is_safe_to_send(biz)
+    assert not safe
+    assert any("doesn't match dm name" in r.lower() for r in reasons)
+
+
+def test_safe_to_send_rejects_civilrights_edu():
+    """Search 45, row 16: civilrights@dtcc.edu with DM David Wachsman."""
+    biz = _biz(
+        primary_email="civilrights@dtcc.edu",
+        contact_name="David Wachsman",
+    )
+    safe, reasons = is_safe_to_send(biz)
+    assert not safe
+
+
+def test_safe_to_send_accepts_dr_prefix_dental_pattern():
+    """Search 45, row 1: drfischman@nebraskadentalcenter.com with DM
+    Keenan Fischman. "dr{last}" is a common dental pattern and should
+    pass the name-match gate."""
+    biz = _biz(
+        primary_email="drfischman@nebraskadentalcenter.com",
+        contact_name="Keenan Fischman",
+    )
+    safe, reasons = is_safe_to_send(biz)
+    assert safe, f"dr{{last}} pattern should pass: {reasons}"
+
+
+def test_safe_to_send_accepts_nickname_match():
+    """Jeff ↔ Jeffrey should count as a match."""
+    biz = _biz(
+        primary_email="jeff.buhrman@firm.com",
+        contact_name="Jeffrey Buhrman",
+    )
+    safe, reasons = is_safe_to_send(biz)
+    assert safe, f"nickname should pass: {reasons}"
+
+
+def test_classify_review_on_name_mismatch():
+    """Name-mismatch rows go to review, not skip — the mailbox may
+    still deliver, but needs human check."""
+    biz = _biz(
+        primary_email="hba@emergencydental.com",
+        contact_name="Diana Giblette",
+    )
+    assert classify_for_send(biz) == "review"
+
+
+def test_permissive_mode_skips_name_match():
+    """Permissive should relax name-match along with rating/freshness."""
+    biz = _biz(
+        primary_email="hba@emergencydental.com",
+        contact_name="Diana Giblette",
+    )
+    safe, _ = is_safe_to_send(biz, permissive=True)
+    assert safe
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Duplicate email detection
+# ──────────────────────────────────────────────────────────────────────
+
+def test_mark_duplicates_identifies_second_occurrence():
+    """Search 45, rows 14+15: mohammad.spouh@aspendental.com on two
+    franchise locations. Second occurrence should be flagged."""
+    rows = [
+        {"id": 1, "primary_email": "mohammad.spouh@aspendental.com"},
+        {"id": 2, "primary_email": "unique@firm.com"},
+        {"id": 3, "primary_email": "mohammad.spouh@aspendental.com"},
+        {"id": 4, "primary_email": "mohammad.spouh@aspendental.com"},
+    ]
+    dup = mark_duplicate_emails(rows)
+    assert dup[1] == 0   # first occurrence — safe
+    assert dup[2] == 0   # unrelated email
+    assert dup[3] == 1   # second occurrence
+    assert dup[4] == 2   # third occurrence
+
+
+def test_mark_duplicates_case_insensitive():
+    rows = [
+        {"id": 1, "primary_email": "Foo@Bar.Com"},
+        {"id": 2, "primary_email": "foo@bar.com"},
+    ]
+    dup = mark_duplicate_emails(rows)
+    assert dup[1] == 0
+    assert dup[2] == 1
+
+
+def test_mark_duplicates_skips_empty():
+    rows = [
+        {"id": 1, "primary_email": ""},
+        {"id": 2, "primary_email": None},
+        {"id": 3, "primary_email": "real@firm.com"},
+    ]
+    dup = mark_duplicate_emails(rows)
+    # Empty emails aren't tracked — missing from dict
+    assert 1 not in dup
+    assert 2 not in dup
+    assert dup[3] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Stopword expansion (search 45)
+# ──────────────────────────────────────────────────────────────────────
+
+from src.volume_mode.stopwords import is_generic
+
+
+@pytest.mark.parametrize("local", [
+    # Healthcare-specific from search 45
+    "manager", "patientbilling", "patientsupport", "patients",
+    "patientcare", "patientservice",
+    "civilrights", "compliance",
+    # Managerial variants
+    "generalmanager", "practicemanager", "officemanager",
+    "regionalmanager",
+    # Additional medical ops
+    "insurance", "claims", "records", "medicalrecords",
+    "nursing",
+])
+def test_search45_generic_locals_rejected(local):
+    assert is_generic(local), f"{local!r} should be generic"

@@ -517,12 +517,27 @@ filtered = [
 # Apply the strict send-safety gate on top of the regular filters
 if send_safe_only:
     try:
-        from src.send_safety import is_safe_to_send, domains_with_bounces
+        from src.send_safety import (
+            is_safe_to_send, domains_with_bounces, mark_duplicate_emails,
+        )
         bounce_domains = domains_with_bounces()
+        # Detect within-search duplicates FIRST so the name-match gate
+        # and NB gate don't silently pass two rows pointing at the
+        # same mailbox (classic chain-franchise failure mode — same
+        # corporate contact lives in N rows, sending to all N = spam
+        # signal to ESPs).
+        dup_index = mark_duplicate_emails(filtered)
         safe_filtered = []
         unsafe_count = 0
         unsafe_reasons_tally: dict[str, int] = {}
         for b in filtered:
+            # Duplicate check: keep the first occurrence, flag later ones
+            if dup_index.get(b.get("id"), 0) > 0:
+                unsafe_count += 1
+                unsafe_reasons_tally["duplicate email within search"] = (
+                    unsafe_reasons_tally.get("duplicate email within search", 0) + 1
+                )
+                continue
             safe, reasons = is_safe_to_send(
                 b, domain_bounce_set=bounce_domains,
                 permissive=permissive_mode,

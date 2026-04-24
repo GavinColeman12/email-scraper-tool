@@ -70,8 +70,26 @@ GENERIC_LOCAL_PARTS = {
     "contactanattorney", "talktoanattorney", "talktoalawyer",
     # HR
     "hr", "careers", "jobs", "recruiting", "recruitment", "hiring",
-    # Legal / policy
+    # Legal / policy / compliance shared inboxes (search 45 dental leak)
     "legal", "compliance", "privacy", "gdpr", "dpo",
+    "civilrights", "civil-rights", "eeoc", "ethics", "ethicsline",
+    "policy", "policies", "regulatory", "regulations",
+    # Managerial / admin shared inboxes — "manager@" is a classic
+    # shared mailbox that routes to whoever has the duty that week.
+    "manager", "managers", "generalmanager", "gm",
+    "practicemanager", "officemanager", "regionalmanager",
+    "assistantmanager", "managingdirector",
+    # Healthcare-specific shared inboxes that slipped through search 45
+    "patients", "patientcare", "patientservice", "patientservices",
+    "patientbilling", "patientbills", "patientsupport",
+    "patientrelations", "patientexperience", "patientaccess",
+    "insurance", "insuranceverification", "claims", "claimsdept",
+    "appointments",  # (already have — re-affirming)
+    "appointmentscheduler", "scheduler", "schedulers",
+    "frontoffice",   # (already have)
+    "records", "medicalrecords", "healthrecords", "recordsdept",
+    "nursing", "nurses", "nursingdept",
+    "referrals", "referral",
     # Security
     "abuse", "security", "it", "tech", "technical", "dev", "developer",
     "api", "devops", "webmaster", "postmaster", "hostmaster",
