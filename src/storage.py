@@ -370,6 +370,21 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
     conn = _connect()
     try:
         cur = _cursor(conn)
+        # Normalize the NB verdict. Accepts either the dedicated
+        # neverbounce_result key OR parses it out of email_source if
+        # that's all the caller passed (triangulation_pattern ==
+        # NeverBounce suffix style). The learned-priors aggregator
+        # relies on this column being populated going forward.
+        nb_val = (scrape_result.get("neverbounce_result") or "").lower().strip()
+        if not nb_val:
+            import re as _re_nb
+            src = scrape_result.get("email_source") or ""
+            m = _re_nb.search(
+                r"NeverBounce\s+(VALID|CATCH-ALL|UNKNOWN|INVALID)",
+                src, _re_nb.IGNORECASE,
+            )
+            if m:
+                nb_val = m.group(1).lower().replace("catch-all", "catchall")
         sql = f"""
             UPDATE businesses SET
                 primary_email = {_PARAM},
@@ -386,7 +401,8 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
                 triangulation_pattern = {_PARAM},
                 triangulation_confidence = {_PARAM},
                 triangulation_method = {_PARAM},
-                email_safe_to_send = {_PARAM}
+                email_safe_to_send = {_PARAM},
+                neverbounce_result = {_PARAM}
             WHERE id = {_PARAM}
         """
         cur.execute(sql, (
@@ -405,6 +421,7 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
             scrape_result.get("triangulation_confidence") or None,
             scrape_result.get("triangulation_method") or None,
             1 if scrape_result.get("email_safe_to_send") else 0,
+            nb_val or None,
             business_id,
         ))
         conn.commit()

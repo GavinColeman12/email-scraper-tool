@@ -107,3 +107,63 @@ def test_first_last_empty_row():
     first, last = _first_last_of(row)
     assert first == ""
     assert last == ""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# storage.update_business_emails — persists NB verdict
+# ──────────────────────────────────────────────────────────────────────
+
+def test_update_business_emails_persists_nb_from_dedicated_key():
+    from unittest.mock import patch, MagicMock
+    from src import storage
+
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    with patch.object(storage, "_connect", return_value=mock_conn), \
+         patch.object(storage, "_cursor", return_value=mock_cur), \
+         patch.object(storage, "init_db"):
+        storage.update_business_emails(1, {
+            "primary_email": "paula.wyatt@firm.com",
+            "neverbounce_result": "valid",
+            "email_safe_to_send": True,
+        })
+    sql, params = mock_cur.execute.call_args[0]
+    assert "neverbounce_result" in sql.lower()
+    # Find the NB param — second-to-last in the UPDATE (before id)
+    assert "valid" in params
+
+
+def test_update_business_emails_parses_nb_from_email_source_fallback():
+    """When caller passes email_source with a NeverBounce suffix but no
+    explicit neverbounce_result key, we parse it out."""
+    from unittest.mock import patch, MagicMock
+    from src import storage
+
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    with patch.object(storage, "_connect", return_value=mock_conn), \
+         patch.object(storage, "_cursor", return_value=mock_cur), \
+         patch.object(storage, "init_db"):
+        storage.update_business_emails(1, {
+            "primary_email": "paula.wyatt@firm.com",
+            "email_source": "industry prior '{f}{last}' (law) — NeverBounce CATCH-ALL (unverified)",
+        })
+    _, params = mock_cur.execute.call_args[0]
+    assert "catchall" in params
+
+
+def test_update_business_emails_stores_none_when_no_verdict():
+    from unittest.mock import patch, MagicMock
+    from src import storage
+
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    with patch.object(storage, "_connect", return_value=mock_conn), \
+         patch.object(storage, "_cursor", return_value=mock_cur), \
+         patch.object(storage, "init_db"):
+        storage.update_business_emails(1, {
+            "primary_email": "x@y.com",
+            "email_source": "scraped from website",
+        })
+    _, params = mock_cur.execute.call_args[0]
+    assert None in params  # NB column set to NULL explicitly

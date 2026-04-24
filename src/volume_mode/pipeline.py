@@ -944,4 +944,8 @@ def volume_result_to_scrape_result(result: VolumeResult, business: dict) -> dict
         "triangulation_method": ("volume_triangulation"
                                  if result.detected_pattern else "volume_industry_prior"),
         "email_safe_to_send": result.safe_to_send,
+        # Dedicated NB column — feeds learned_priors.compute_learned_priors().
+        # top_nb is the NB verdict on the winning email; normalized to
+        # the same shape the storage UPDATE expects.
+        "neverbounce_result": (top_nb or "").lower() or None,
     }

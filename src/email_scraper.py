@@ -1404,4 +1404,7 @@ def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
         "triangulation_confidence": result.best_email_confidence or None,
         "triangulation_method": method,
         "email_safe_to_send": result.safe_to_send,
+        # Dedicated NB column — feeds learned_priors so every new
+        # triangulation scrape contributes to the pattern learner.
+        "neverbounce_result": (nb or "").lower() or None,
     }
