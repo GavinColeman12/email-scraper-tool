@@ -581,23 +581,24 @@ if send_safe_only:
                 ) in ("review", "reverify")
             ]
             if review_biz:
-                est_cost = min(len(review_biz) * 0.018, 5.0)
+                est_cost = min(len(review_biz) * 0.009, 2.0)
                 rc1, rc2 = st.columns([3, 2])
                 with rc1:
                     st.caption(
                         f"💡 **{len(review_biz)} rows are in review or "
                         f"reverify** — rescue tries to upgrade them by "
-                        f"re-NBing the email + testing additional DM "
-                        f"patterns. Est. cost: **~${est_cost:.2f}** "
-                        f"(hard cap $5 per batch)."
+                        f"re-NBing the email + testing up to 3 of the "
+                        f"highest-probability DM patterns. Est. cost: "
+                        f"**~${est_cost:.2f}** (hard cap $2 per batch)."
                     )
                 with rc2:
                     if st.button(
                         f"🚑 Rescue {len(review_biz)} review rows",
-                        help="Re-verifies NB-unknown rows and builds "
-                             "additional DM pattern guesses (first_last, "
-                             "last.first, dr.last, etc.) for name-mismatch "
-                             "rows. Budget: $0.018/row, $5 total cap.",
+                        help="Max 3 NB calls per row (~$0.009). Dental/"
+                             "medical rows try dr.last, drfirst, doctorlast "
+                             "first. Other verticals try first_last, "
+                             "last.first, first@. Budget: $0.009/row, "
+                             "$2 total cap.",
                     ):
                         from src.review_rescue import bulk_rescue
                         prog = st.progress(0)
@@ -613,36 +614,47 @@ if send_safe_only:
                         with st.spinner("Running rescue pass…"):
                             summary = bulk_rescue(
                                 review_biz,
-                                total_budget_usd=5.0,
+                                total_budget_usd=2.0,
                                 progress_cb=_progress,
                             )
-                        # Persist upgrades to DB
-                        from src.neverbounce import NeverBounceResult
+                        # Persist upgrades via the focused helper —
+                        # update_business_emails() is a full-row
+                        # overwrite that would wipe contact_name,
+                        # evidence trail, triangulation data, etc.
+                        # apply_rescue_upgrade touches only the 5
+                        # fields that actually change on a rescue.
                         updated = 0
+                        persist_errors: list[str] = []
                         for u in summary["upgraded"]:
                             try:
-                                storage.update_business_emails(
-                                    u["biz_id"],
-                                    {
-                                        "primary_email": u["new_email"],
-                                        "neverbounce_result": u["new_nb_result"],
-                                        "email_safe_to_send": True,
-                                        "confidence": "high",
-                                    },
+                                storage.apply_rescue_upgrade(
+                                    business_id=u["biz_id"],
+                                    new_email=u["new_email"],
+                                    new_nb_result=u["new_nb_result"],
+                                    confidence="high",
                                 )
                                 updated += 1
                             except Exception as e:
-                                logger.warning(f"persist rescue failed: {e}") if False else None
+                                persist_errors.append(
+                                    f"biz {u['biz_id']}: {type(e).__name__}: {e}"
+                                )
 
                         prog.empty()
                         status_box.success(
                             f"🚑 Rescue done — "
-                            f"**{len(summary['upgraded'])}** upgraded · "
+                            f"**{updated} persisted** / "
+                            f"{len(summary['upgraded'])} upgrades · "
                             f"**{len(summary['exhausted'])}** exhausted · "
                             f"**{len(summary['skipped'])}** skipped · "
                             f"spent **${summary['total_cost_usd']:.3f}**"
                             + (" (hit budget cap)" if summary["stopped_early"] else "")
                         )
+                        if persist_errors:
+                            with st.expander(
+                                f"⚠️ {len(persist_errors)} persist errors"
+                            ):
+                                for err in persist_errors:
+                                    st.text(err)
                         if summary["upgraded"]:
                             with st.expander(
                                 f"✅ Show {len(summary['upgraded'])} upgraded rows"

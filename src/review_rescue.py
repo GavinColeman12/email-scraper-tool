@@ -37,23 +37,35 @@ logger = logging.getLogger(__name__)
 
 
 COST_NB_CALL = 0.003
-DEFAULT_BUDGET_PER_ROW_USD = 0.018
+# Hard cap: 3 NB calls per row = $0.009. A batch of 100 review rows
+# costs at most $0.90 — keeps rescue from ballooning when the gate
+# holds back a lot of rows. If the row has NB=unknown, we spend 1
+# call retrying + up to 2 on new patterns. If the row is a name-
+# mismatch, we spend up to 3 on the 3 most-likely DM patterns.
+DEFAULT_BUDGET_PER_ROW_USD = 0.009
+DEFAULT_MAX_CANDIDATES = 3
 
 
 # ── Pattern generator — broader than the volume_mode priors ──────────
 # Ordered by "most likely to work" so we NB the good ones first and
 # stop as soon as one comes back valid.
 def _extended_patterns(first: str, last: str, domain: str,
-                        vertical: str = "") -> list[tuple[str, str]]:
+                        vertical: str = "",
+                        max_candidates: int = DEFAULT_MAX_CANDIDATES,
+                        ) -> list[tuple[str, str]]:
     """
-    Return [(pattern_name, email), ...] for every additional pattern
-    worth trying on this DM. Excludes patterns that are universally
-    tried in the first pass (first.last, flast, firstl) since those
-    already came back NB-invalid for review rows — but does include
-    separator variants (first_last, first-last) that many chains use.
+    Return the TOP `max_candidates` pattern guesses for this DM,
+    ordered by real-world hit rate. The full list has ~15 variants;
+    we slice the most-likely ones so each review row costs at most
+    `max_candidates` NB calls ($0.003 each).
 
-    `vertical` nudges which patterns are most likely first: dental/
-    medical gets dr{last} / doctor{last} weighted up.
+    Priority order by vertical:
+      - Dental / medical: dr.{last}, dr{last}, doctor{last}, {first}_{last}
+      - Everyone else:    {first}_{last}, {last}.{first}, {first}, {last}
+
+    Excludes {first}.{last}, {f}{last}, {first}{l} since those are
+    already tried in the first scrape pass — rescue runs AFTER those
+    bounced, so re-NBing them would burn budget on known-bad guesses.
     """
     f = (first or "").lower().strip()
     l = (last or "").lower().strip()
@@ -61,51 +73,53 @@ def _extended_patterns(first: str, last: str, domain: str,
     if not d:
         return []
 
-    patterns: list[tuple[str, str]] = []
-
-    # Separator variants — missed by the standard first.last build
-    if f and l:
-        patterns.append(("first_last", f"{f}_{l}@{d}"))
-        patterns.append(("first-last", f"{f}-{l}@{d}"))
-
-    # Reversed order — some firms use lastname first
-    if f and l:
-        patterns.append(("last.first", f"{l}.{f}@{d}"))
-        patterns.append(("last_first", f"{l}_{f}@{d}"))
-        patterns.append(("lastfirst", f"{l}{f}@{d}"))
-
-    # First-name only (distinctive first names, startups)
-    if f and len(f) >= 4:
-        patterns.append(("first", f"{f}@{d}"))
-
-    # Last-name only (partner firms, sole-prop)
-    if l and len(l) >= 4:
-        patterns.append(("last", f"{l}@{d}"))
-
-    # Initial patterns we haven't tried
-    if f and l:
-        patterns.append(("f.last", f"{f[0]}.{l}@{d}"))      # j.smith
-        patterns.append(("firstl", f"{f}{l[0]}@{d}"))       # johns
-        patterns.append(("first.l", f"{f}.{l[0]}@{d}"))     # john.s
-        patterns.append(("fl", f"{f[0]}{l[0]}@{d}"))        # js
-
-    # Dental / medical — "dr" prefix is common for founder doctors
     is_medical = any(
         v in (vertical or "").lower()
         for v in ("dental", "medical", "clinic", "dental clinic",
                     "dentist", "orthodontist", "oral", "chiropractic",
                     "medspa", "aesthetic", "veterinar")
     )
+
+    patterns: list[tuple[str, str]] = []
+
+    # Highest-priority patterns go FIRST so that with max_candidates=3
+    # we always NB the most promising ones.
+
+    # Dental/medical prefix — empirically high hit rate on doctor-owned
+    # clinics, first-line guess for that vertical
     if is_medical and l:
         patterns.append(("dr.last", f"dr.{l}@{d}"))
-        patterns.append(("doctor_last", f"doctor{l}@{d}"))
         if f:
             patterns.append(("drfirst", f"dr{f}@{d}"))
+        patterns.append(("doctorlast", f"doctor{l}@{d}"))
+        if f:
             patterns.append(("dr.first", f"dr.{f}@{d}"))
 
-    # Dedup while preserving order — a pattern can map to the same
-    # email as another (e.g. dr.last and doctorlast on single-syllable
-    # lastnames); we only want to NB each unique address once
+    # Underscore separator — very common at corporate chains
+    # (aspendental, mydrdental, absolutedental all use it)
+    if f and l:
+        patterns.append(("first_last", f"{f}_{l}@{d}"))
+
+    # Reversed order — common at small firms where the last name
+    # forms the domain
+    if f and l:
+        patterns.append(("last.first", f"{l}.{f}@{d}"))
+
+    # Single-name patterns — distinctive first / last names
+    if f and len(f) >= 4:
+        patterns.append(("first", f"{f}@{d}"))
+    if l and len(l) >= 4:
+        patterns.append(("last", f"{l}@{d}"))
+
+    # Hyphen separator + other initial variants — lower priority
+    if f and l:
+        patterns.append(("first-last", f"{f}-{l}@{d}"))
+        patterns.append(("last_first", f"{l}_{f}@{d}"))
+        patterns.append(("f.last", f"{f[0]}.{l}@{d}"))
+        patterns.append(("first.l", f"{f}.{l[0]}@{d}"))
+        patterns.append(("fl", f"{f[0]}{l[0]}@{d}"))
+
+    # Dedup while preserving priority order
     seen = set()
     unique: list[tuple[str, str]] = []
     for name, email in patterns:
@@ -113,6 +127,8 @@ def _extended_patterns(first: str, last: str, domain: str,
             continue
         seen.add(email)
         unique.append((name, email))
+        if len(unique) >= max_candidates:
+            break
     return unique
 
 
@@ -140,12 +156,16 @@ def rescue_review_row(
       biz: the business dict (from storage.list_businesses)
       nb_verify_fn: a callable(email) -> dict with 'result' key. Passed
         in so tests can stub it; falls back to src.neverbounce.verify.
-      budget_usd: max NB spend on this row. Default $0.018 (6 calls).
+      budget_usd: max NB spend on this row. Default $0.009 (3 calls).
 
     Returns a RescueResult with the new email (if upgraded) + attempts
     log. Does NOT write to the DB — caller is responsible for updating
     storage based on the result.
     """
+    # Convert budget to integer call count to avoid floating-point
+    # precision where 0.003 + 0.003 + 0.003 = 0.009000000000001 and
+    # the final call gets wrongly skipped. Round up: $0.009 = 3 calls.
+    max_calls = max(1, int(round(budget_usd / COST_NB_CALL)))
     # Lazy-import NB so the function is still testable without the SDK
     if nb_verify_fn is None:
         try:
@@ -184,6 +204,7 @@ def rescue_review_row(
         return RescueResult(status="skipped", reason="no domain")
 
     cost = 0.0
+    calls_made = 0
     attempts: list[dict] = []
 
     # ── STRATEGY 1: NB unknown → re-verify the current email ────────
@@ -192,6 +213,7 @@ def rescue_review_row(
         try:
             r = nb_verify_fn(email)
             cost += COST_NB_CALL
+            calls_made += 1
             attempts.append({"email": email, "nb_result": r.get("result"),
                               "via": "retry_unknown"})
             new_result = (r.get("result") or "").lower()
@@ -242,12 +264,13 @@ def rescue_review_row(
                          if e.lower() not in already_tried]
 
         for pattern_name, candidate in new_patterns:
-            if cost + COST_NB_CALL > budget_usd:
+            if calls_made >= max_calls:
                 # Hit the per-row cap — stop and mark exhausted
                 break
             try:
                 r = nb_verify_fn(candidate)
                 cost += COST_NB_CALL
+                calls_made += 1
                 res = (r.get("result") or "").lower()
                 attempts.append({"email": candidate, "pattern": pattern_name,
                                   "nb_result": res})

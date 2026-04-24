@@ -17,32 +17,49 @@ from src.review_rescue import (
 # Pattern generator
 # ──────────────────────────────────────────────────────────────────────
 
-def test_extended_patterns_includes_separator_variants():
+def test_extended_patterns_capped_at_max_candidates():
+    """Default cap is 3 — we never return more than that."""
     pats = _extended_patterns("paula", "wyatt", "firm.com")
-    emails = [e for _, e in pats]
-    assert "paula_wyatt@firm.com" in emails
-    assert "paula-wyatt@firm.com" in emails
+    assert len(pats) == 3, f"expected 3, got {len(pats)}: {pats}"
 
 
-def test_extended_patterns_includes_last_first():
-    pats = _extended_patterns("paula", "wyatt", "firm.com")
-    emails = [e for _, e in pats]
-    assert "wyatt.paula@firm.com" in emails
-
-
-def test_extended_patterns_dental_includes_dr_prefix():
+def test_extended_patterns_caller_can_raise_cap():
     pats = _extended_patterns(
-        "keenan", "fischman", "firm.com",
-        vertical="dentist",
+        "paula", "wyatt", "firm.com", max_candidates=10,
+    )
+    assert len(pats) > 3
+
+
+def test_extended_patterns_law_priority_order():
+    """Non-medical: first_last, last.first, first@ take priority —
+    those have the highest hit rate across legal/tech firms."""
+    pats = _extended_patterns("paula", "wyatt", "firm.com",
+                                vertical="law firm", max_candidates=3)
+    emails = [e for _, e in pats]
+    assert emails[0] == "paula_wyatt@firm.com"
+    assert emails[1] == "wyatt.paula@firm.com"
+    # Third slot: first@ or last@ (either works — both are reasonable
+    # for sole-prop / small firms)
+    assert emails[2] in ("paula@firm.com", "wyatt@firm.com")
+
+
+def test_extended_patterns_dental_priority_order():
+    """Dental/medical: dr.last is the #1 guess — massive hit rate on
+    doctor-owned clinics (search 45 confirmed)."""
+    pats = _extended_patterns(
+        "keenan", "fischman", "firm.com", vertical="dentist",
+        max_candidates=3,
     )
     emails = [e for _, e in pats]
-    assert "dr.fischman@firm.com" in emails
-    assert any("doctorfischman" in e for e in emails)
+    assert emails[0] == "dr.fischman@firm.com"
+    # dr{first} and doctor{last} fill the remaining 2 slots
+    assert "drkeenan@firm.com" in emails or "doctorfischman@firm.com" in emails
 
 
 def test_extended_patterns_non_medical_skips_dr():
     pats = _extended_patterns(
         "paula", "wyatt", "firm.com", vertical="law firm",
+        max_candidates=10,
     )
     emails = [e for _, e in pats]
     assert not any("dr.wyatt" in e for e in emails)
@@ -50,7 +67,9 @@ def test_extended_patterns_non_medical_skips_dr():
 
 def test_extended_patterns_dedup():
     """Patterns that resolve to the same email should appear only once."""
-    pats = _extended_patterns("pat", "lee", "firm.com", vertical="dental")
+    pats = _extended_patterns(
+        "pat", "lee", "firm.com", vertical="dental", max_candidates=20,
+    )
     emails = [e for _, e in pats]
     assert len(emails) == len(set(emails))
 
@@ -83,7 +102,8 @@ def test_rescue_nb_unknown_retry_succeeds():
 
 
 def test_rescue_nb_unknown_retry_still_unknown_tries_patterns():
-    """NB stays unknown on retry → fall through to pattern synthesis."""
+    """NB stays unknown on retry → fall through to pattern synthesis,
+    bounded by the 3-call per-row budget."""
     biz = {
         "id": 1,
         "primary_email": "paula.wyatt@firm.com",
@@ -91,17 +111,36 @@ def test_rescue_nb_unknown_retry_still_unknown_tries_patterns():
         "contact_name": "Paula Wyatt",
         "business_type": "Law firm",
     }
-    # Retry returns unknown; then pattern first_last returns valid
+    # Retry returns unknown; first pattern invalid; second valid.
+    # With budget=$0.009 (3 calls), we spend: 1 retry + 2 patterns.
     nb_fn = MagicMock(side_effect=[
         {"result": "unknown"},       # retry primary
-        {"result": "invalid"},       # first_last variant
-        {"result": "invalid"},       # first-last variant
-        {"result": "valid"},         # wyatt.paula@firm.com (last.first)
+        {"result": "invalid"},       # first pattern
+        {"result": "valid"},         # second pattern wins
     ])
     result = rescue_review_row(biz, nb_verify_fn=nb_fn)
     assert result.status == "upgraded"
     assert result.new_nb_result == "valid"
-    assert result.cost_usd == 4 * COST_NB_CALL
+    assert result.cost_usd == 3 * COST_NB_CALL
+
+
+def test_rescue_stops_at_per_row_budget():
+    """Default budget ($0.009) = 3 NB calls. Must not exceed that
+    even if more patterns are available."""
+    biz = {
+        "id": 1,
+        "primary_email": "manager@firm.com",
+        "neverbounce_result": "valid",  # scraped shared inbox
+        "contact_name": "Paula Wyatt",
+        "business_type": "Dental clinic",
+    }
+    # Every NB call returns invalid — rescue must still stop at 3
+    nb_fn = MagicMock(return_value={"result": "invalid"})
+    result = rescue_review_row(biz, nb_verify_fn=nb_fn)
+    assert result.status == "exhausted"
+    assert nb_fn.call_count <= 3, (
+        f"must not exceed 3 NB calls per row, made {nb_fn.call_count}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -214,6 +253,88 @@ def test_bulk_rescue_respects_total_budget():
                            nb_verify_fn=nb_fn)
     assert summary["stopped_early"]
     assert summary["total_cost_usd"] <= 0.006 + 1e-9
+
+
+def test_apply_rescue_upgrade_writes_only_rescue_fields():
+    """
+    apply_rescue_upgrade() must UPDATE only the 5 rescue fields
+    (primary_email, neverbounce_result, email_safe_to_send,
+    confidence, scraped_at). Regression for the bug where a partial
+    rescue persist via update_business_emails() was wiping
+    contact_name, evidence_trail, triangulation fields, etc.
+
+    Verified by asserting the exact SQL statement executed — we
+    inspect the UPDATE's SET clause and confirm it doesn't include
+    any evidence-trail columns.
+    """
+    from unittest.mock import patch, MagicMock
+    from src import storage
+
+    # Mock connect + cursor so we capture the SQL without hitting a DB
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    with patch.object(storage, "_connect", return_value=mock_conn), \
+         patch.object(storage, "_cursor", return_value=mock_cur), \
+         patch.object(storage, "init_db"):
+        storage.apply_rescue_upgrade(
+            business_id=42,
+            new_email="paula.wyatt@wyattdental.com",
+            new_nb_result="valid",
+            confidence="high",
+        )
+
+    # execute was called once with the UPDATE
+    assert mock_cur.execute.called
+    sql, params = mock_cur.execute.call_args[0]
+
+    # The SET clause must touch ONLY the five rescue fields.
+    # Anything in the SET clause that's an evidence field is a bug.
+    set_clause = sql.split("SET", 1)[1].split("WHERE", 1)[0].lower()
+    allowed = {
+        "primary_email", "neverbounce_result", "email_safe_to_send",
+        "confidence", "scraped_at",
+    }
+    forbidden = {
+        "contact_name", "contact_title", "email_source", "reasoning",
+        "synthesizer", "professional_ids", "triangulation_pattern",
+        "triangulation_confidence", "triangulation_method",
+        "scraped_emails_json", "constructed_emails_json",
+        "lead_quality_score", "lead_tier", "business_name",
+    }
+    for col in forbidden:
+        assert col not in set_clause, \
+            f"apply_rescue_upgrade() must NOT update {col!r} — would wipe evidence"
+    for col in allowed:
+        assert col in set_clause, \
+            f"apply_rescue_upgrade() must update {col!r}"
+
+    # Params — new_email first, NB result second, safe-to-send=1 (valid)
+    assert params[0] == "paula.wyatt@wyattdental.com"
+    assert params[1] == "valid"
+    assert params[2] == 1  # safe_to_send=True because NB=valid
+    assert params[3] == "high"
+    assert params[-1] == 42  # business_id at end
+
+
+def test_apply_rescue_upgrade_safe_to_send_false_on_non_valid_nb():
+    """If the rescue winds up with non-valid NB (e.g. catchall), we
+    still overwrite the email but email_safe_to_send MUST be 0 —
+    we don't want rescue to upgrade a catchall pick to send-safe."""
+    from unittest.mock import patch, MagicMock
+    from src import storage
+
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    with patch.object(storage, "_connect", return_value=mock_conn), \
+         patch.object(storage, "_cursor", return_value=mock_cur), \
+         patch.object(storage, "init_db"):
+        storage.apply_rescue_upgrade(
+            business_id=1, new_email="x@y.com",
+            new_nb_result="catchall", confidence="medium",
+        )
+    params = mock_cur.execute.call_args[0][1]
+    assert params[1] == "catchall"
+    assert params[2] == 0  # catchall is NOT safe_to_send
 
 
 def test_bulk_rescue_buckets_results():

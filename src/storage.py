@@ -429,6 +429,49 @@ def update_business_verification(business_id: int, status: str, reason: str = ""
         conn.close()
 
 
+def apply_rescue_upgrade(
+    business_id: int,
+    new_email: str,
+    new_nb_result: str,
+    *,
+    confidence: str = "high",
+) -> None:
+    """
+    Persist a successful rescue: swap primary_email, refresh the NB
+    verdict + timestamp, and flag safe_to_send. Leaves every other
+    column untouched — contact_name, contact_title, evidence trail,
+    triangulation data, lead score, etc. all preserved.
+
+    update_business_emails() is a full-row overwrite designed for
+    fresh scrapes, not partial updates; calling it with a minimal
+    dict nulls out the evidence columns. This function is the
+    focused alternative for the rescue pass.
+    """
+    init_db()
+    conn = _connect()
+    try:
+        cur = _cursor(conn)
+        cur.execute(f"""
+            UPDATE businesses SET
+                primary_email = {_PARAM},
+                neverbounce_result = {_PARAM},
+                email_safe_to_send = {_PARAM},
+                confidence = {_PARAM},
+                scraped_at = {_PARAM}
+            WHERE id = {_PARAM}
+        """, (
+            new_email,
+            (new_nb_result or "").lower().strip() or None,
+            1 if (new_nb_result or "").lower().strip() == "valid" else 0,
+            confidence,
+            datetime.utcnow().isoformat(),
+            business_id,
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def override_primary_email(business_id: int, new_email: str) -> None:
     init_db()
     conn = _connect()
