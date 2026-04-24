@@ -565,6 +565,93 @@ if send_safe_only:
                 f"🛡️ Send-safe gate held back **{unsafe_count}** rows. "
                 f"Top reasons: {tally_str}"
             )
+
+            # ── Rescue action: retry NB + try more DM patterns ──
+            # For every row the gate held back, attempt to upgrade:
+            #   - NB-unknown → re-verify (often a transient API issue)
+            #   - Name-mismatch → try 15+ additional DM pattern guesses
+            # Only offer when the bounce-history + NB-invalid rows are
+            # excluded (those are unrecoverable).
+            from src.send_safety import classify_for_send
+            review_biz = [
+                b for b in ranked
+                if classify_for_send(
+                    b, domain_bounce_set=bounce_domains,
+                    permissive=permissive_mode,
+                ) in ("review", "reverify")
+            ]
+            if review_biz:
+                est_cost = min(len(review_biz) * 0.018, 5.0)
+                rc1, rc2 = st.columns([3, 2])
+                with rc1:
+                    st.caption(
+                        f"💡 **{len(review_biz)} rows are in review or "
+                        f"reverify** — rescue tries to upgrade them by "
+                        f"re-NBing the email + testing additional DM "
+                        f"patterns. Est. cost: **~${est_cost:.2f}** "
+                        f"(hard cap $5 per batch)."
+                    )
+                with rc2:
+                    if st.button(
+                        f"🚑 Rescue {len(review_biz)} review rows",
+                        help="Re-verifies NB-unknown rows and builds "
+                             "additional DM pattern guesses (first_last, "
+                             "last.first, dr.last, etc.) for name-mismatch "
+                             "rows. Budget: $0.018/row, $5 total cap.",
+                    ):
+                        from src.review_rescue import bulk_rescue
+                        prog = st.progress(0)
+                        status_box = st.empty()
+
+                        def _progress(i, total, result):
+                            prog.progress(i / total)
+                            status_box.write(
+                                f"**{i}/{total}** · {result.status} "
+                                f"· {result.reason[:80]}"
+                            )
+
+                        with st.spinner("Running rescue pass…"):
+                            summary = bulk_rescue(
+                                review_biz,
+                                total_budget_usd=5.0,
+                                progress_cb=_progress,
+                            )
+                        # Persist upgrades to DB
+                        from src.neverbounce import NeverBounceResult
+                        updated = 0
+                        for u in summary["upgraded"]:
+                            try:
+                                storage.update_business_emails(
+                                    u["biz_id"],
+                                    {
+                                        "primary_email": u["new_email"],
+                                        "neverbounce_result": u["new_nb_result"],
+                                        "email_safe_to_send": True,
+                                        "confidence": "high",
+                                    },
+                                )
+                                updated += 1
+                            except Exception as e:
+                                logger.warning(f"persist rescue failed: {e}") if False else None
+
+                        prog.empty()
+                        status_box.success(
+                            f"🚑 Rescue done — "
+                            f"**{len(summary['upgraded'])}** upgraded · "
+                            f"**{len(summary['exhausted'])}** exhausted · "
+                            f"**{len(summary['skipped'])}** skipped · "
+                            f"spent **${summary['total_cost_usd']:.3f}**"
+                            + (" (hit budget cap)" if summary["stopped_early"] else "")
+                        )
+                        if summary["upgraded"]:
+                            with st.expander(
+                                f"✅ Show {len(summary['upgraded'])} upgraded rows"
+                            ):
+                                st.dataframe(
+                                    summary["upgraded"],
+                                    use_container_width=True, hide_index=True,
+                                )
+                        st.rerun()
     except Exception as e:
         st.warning(f"Send-safe gate failed to apply: {e}")
 
