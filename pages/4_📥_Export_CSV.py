@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from src import storage
-from src.export_rows import build_rows, EXPORT_COLUMNS, verify_badge, split_contact_name
+from src.export_rows import build_rows, EXPORT_COLUMNS
 
 st.set_page_config(page_title="Export CSV", page_icon="📥", layout="wide")
 st.title("📥 Export to CSV")
@@ -25,15 +25,7 @@ if not searches:
     st.stop()
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import re
-from src.email_verifier import (
-    verify_smtp, verify_smtp_patterns, verify_mx,
-    STATUS_VALID, STATUS_INVALID, STATUS_UNKNOWN,
-)
-
-
-# split_contact_name + verify_badge now live in src/export_rows.py so this
-# page and the Bulk Scrape page share the same schema. Imported above.
+from src.email_verifier import verify_smtp
 
 labels = {s["id"]: f"#{s['id']} — {s['query']}" for s in searches}
 search_id = st.selectbox("Search", options=list(labels.keys()),

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
-from src.email_verifier import verify_mx, verify_smtp, is_known_catchall_mx
+from src.email_verifier import verify_mx, verify_smtp
 from src.neverbounce import verify as neverbounce_verify
 
 

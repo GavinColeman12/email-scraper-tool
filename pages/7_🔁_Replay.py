@@ -17,7 +17,7 @@ import streamlit as st
 from src import storage
 from src.replay_storage import list_replays, get_replay, init_replay_tables
 from src.replay_explain import (
-    explain_biz, explain_change, bucket_label, _tier_rank,
+    explain_biz, explain_change, bucket_label,
 )
 from src.dashboard_queries import search_metadata
 from scripts.replay_search import run_replay, REPLAY_MODES
