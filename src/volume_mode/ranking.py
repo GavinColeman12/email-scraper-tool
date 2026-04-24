@@ -106,7 +106,14 @@ def pick_best(
     # context and picks the best (or says NONE). Replaces the stopword
     # treadmill. Cached per (dm, biz, domain, candidates) so re-runs are
     # free. Falls through to rule-based walk when Haiku unavailable.
-    if use_llm and dm_name and cache is not None and eligible:
+    #
+    # Runs even when dm_name is empty — Haiku can still reject shared-
+    # inbox candidates (connect@, reach@, catering@) based on the local
+    # part alone, without a specific DM to match against. Previously the
+    # empty-DM case silently fell through to rule-based walker, which is
+    # how connect@jlc-law.com won on a biz where Phase 3 synthesis
+    # returned no DM (filled in later by post-pick correction).
+    if use_llm and cache is not None and eligible:
         try:
             from src.email_picker_llm import pick_email_with_llm
             llm_result = pick_email_with_llm(

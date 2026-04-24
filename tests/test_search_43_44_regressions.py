@@ -198,6 +198,48 @@ def test_pick_best_llm_picks_dm_match_over_bucket_c():
     assert winner.email == "william.brice@thebricelawfirm.com"
 
 
+def test_pick_best_llm_runs_even_with_empty_dm_name():
+    """Regression for JLC & Associates connect@ leak (search 46):
+    Phase 3 synthesis returned no DM → dm_name='' at pick_best time →
+    Haiku gate was silently skipped because of `if dm_name and ...`
+    requirement → rule-based walker picked connect@jlc-law.com.
+
+    Fix: Haiku runs whenever cache + eligible, regardless of dm_name.
+    Even without a specific DM, it can reject shared-inbox candidates.
+    """
+    cands = [
+        Candidate(email="connect@jlc-law.com", bucket="c",
+                  pattern="scraped", nb_result="valid"),
+        Candidate(email="elizabeth.aquino@jlc-law.com", bucket="d",
+                  pattern="{first}.{last}", nb_result=None),
+    ]
+    cache = MagicMock()
+    cache.get.return_value = None
+    cache.set = MagicMock()
+
+    from src import email_picker_llm
+    orig = email_picker_llm.pick_email_with_llm
+    picker_mock = MagicMock(
+        return_value=(None, "connect@ is a shared inbox")
+    )
+    try:
+        email_picker_llm.pick_email_with_llm = picker_mock
+        # CRITICAL: no dm_name passed — this is what happened with JLC.
+        # Must still call Haiku, must NOT fall through to rule walker.
+        winner = pick_best(
+            cands, business_name="JLC & Associates",
+            dm_name="", dm_title="",  # <-- empty, the bug's trigger
+            domain="jlc-law.com", cache=cache, use_llm=True,
+        )
+    finally:
+        email_picker_llm.pick_email_with_llm = orig
+
+    # Haiku WAS called
+    assert picker_mock.called, "Haiku gate skipped on empty dm_name"
+    # Haiku said NONE → winner is None, not connect@
+    assert winner is None, f"expected None, got {winner}"
+
+
 def test_pick_best_llm_failure_falls_through():
     """If Haiku is unavailable (returns None), we fall back to the
     rule-based walker — no crash, no behavior change."""
