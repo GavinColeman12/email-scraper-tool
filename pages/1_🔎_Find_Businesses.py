@@ -218,9 +218,11 @@ if results:
             f"🚀 Save + Run full pipeline ({len(selected)} businesses)",
             type="primary",
             disabled=not selected,
-            help="Saves the search AND immediately starts the Verified scraping job in "
-                 "the background: scrape emails, Haiku extraction, SMTP verification, "
-                 "lead scoring. When done, go to 📥 Export CSV to review the results.",
+            help="Saves the search AND immediately starts a Volume-mode "
+                 "scrape in the background: deep website crawl + Wayback + "
+                 "NPI (for medical) + selective NeverBounce. Cost: ~$0.009/"
+                 "biz, ~$1.80 per 200. When done, go to 🚀 Bulk Scrape or "
+                 "📥 Export CSV to review the results.",
         )
 
     if save_only or save_and_run:
@@ -232,11 +234,23 @@ if results:
         count = storage.add_businesses_bulk(search_id, selected)
 
         if save_and_run:
-            # Kick off the Verified pipeline in the background
+            # Kick off the Volume-mode pipeline in the background.
+            # Matches the default of the Bulk Scrape page: cheap
+            # (~$0.009/biz), NPI on medical verticals, CMS-aware NB
+            # interpretation, never picks generic inboxes. For hard
+            # rows the user can opt into "Rescue empties" from Bulk
+            # Scrape's UI on a later pass.
             try:
                 from src import background_jobs
-                from src.deep_scraper import deep_scrape_business_emails
+                from src.volume_mode import scrape_volume
+                from src.volume_mode.pipeline import (
+                    volume_result_to_scrape_result, reset_run_budget,
+                )
                 from src.lead_scoring import compute_lead_quality_score
+
+                # Volume mode tracks a shared per-run cost cap — reset
+                # so yesterday's spend doesn't gate today's job.
+                reset_run_budget(25.0)
 
                 # Pull fresh list with IDs
                 pending = [b for b in storage.list_businesses(search_id=search_id)
@@ -244,16 +258,10 @@ if results:
 
                 def _worker(biz, job_id):
                     try:
-                        addr = biz.get("address", "") or biz.get("location", "")
-                        city = addr.split(",")[0].strip() if addr else ""
-                        result = deep_scrape_business_emails(
-                            business_name=biz["business_name"],
-                            website=biz.get("website", ""),
-                            location=city,
-                            verify_with_mx=True,
-                        )
+                        vres = scrape_volume(biz, use_neverbounce=True)
+                        result = volume_result_to_scrape_result(vres, biz)
                         storage.update_business_emails(biz["id"], result)
-                        # Rescore
+                        # Rescore using the updated row
                         fresh = storage.list_businesses(search_id=search_id)
                         updated = next((b for b in fresh if b["id"] == biz["id"]), None)
                         if updated:
@@ -262,23 +270,27 @@ if results:
                                 biz["id"], s["score"], s["tier"],
                                 all_emails=result.get("scraped_emails", []),
                             )
-                        return True, f"✓ {biz['business_name']} → {result.get('primary_email') or '(skip)'}"
+                        email = result.get("primary_email") or "(no email)"
+                        return True, f"✓ {biz['business_name']} → {email}"
                     except Exception as e:
-                        return False, f"❌ {biz['business_name']}: {type(e).__name__}"
+                        return False, f"❌ {biz['business_name']}: {type(e).__name__}: {e}"
 
                 label = f"{query} in {location}" if location else query
                 job_id = background_jobs.start(
-                    job_type="bulk_verified_scrape",
+                    job_type="bulk_volume_scrape",
                     items=pending,
                     worker_fn=_worker,
                     search_id=search_id,
                     max_workers=6,
-                    metadata={"mode": "verified_oneclick", "search_label": label},
+                    metadata={"mode": "volume_oneclick", "search_label": label},
                 )
                 st.success(
                     f"🚀 Created search #{search_id} ({count} businesses). "
-                    f"Full pipeline running in background (job `{job_id[:8]}`). "
-                    f"Head to **📥 Export CSV** when it's done to review results."
+                    f"Volume-mode pipeline running in background "
+                    f"(job `{job_id[:8]}`). Est. cost "
+                    f"~${count * 0.009:.2f}. "
+                    f"Head to **🚀 Bulk Scrape** to watch progress / run "
+                    f"rescue passes, or **📥 Export CSV** when done."
                 )
             except Exception as e:
                 st.error(f"Search saved but pipeline failed to start: {e}")
