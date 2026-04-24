@@ -27,6 +27,16 @@ from src.volume_mode.ranking import Candidate, pick_best
     "reservations", "specialevents", "privateevents",
     "gifts", "orders", "takeout", "delivery",
     "kitchen", "chef", "dining",
+    # Engagement-style shared inboxes (search user flagged connect@jlc-law.com)
+    "connect", "connects", "connectwith", "connectwithus",
+    "connectnyc",          # prefix-variant pattern
+    "touch", "touchbase", "reachus", "reachout", "reaching",
+    "letstalk", "letschat", "letsconnect",
+    "talktous", "talkwithus",
+    "chatwith", "chatwithus", "chatsf",  # prefix-variant
+    "meetus", "meetwithus",
+    "engageus", "workwithus",
+    "inquire", "inquiry",
     # Venue/location-prefix aliases (search 43)
     "233thompson",         # tartinery.com street-address alias
     "90park",

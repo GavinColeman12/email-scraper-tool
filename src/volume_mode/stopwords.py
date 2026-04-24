@@ -17,6 +17,20 @@ GENERIC_LOCAL_PARTS = {
     "info", "information", "contact", "contactus", "contact-us",
     "get-in-touch", "getintouch", "hello", "hi", "hey", "hiya",
     "howdy", "welcome", "ola",
+    # Engagement / "reach out" shared inboxes — same category as contact@
+    # but framed as "start a conversation" rather than "get in touch".
+    # These are universally shared mailboxes, never a DM's personal one.
+    "connect", "connects", "connecting", "connectwith", "connectwithus",
+    "touch", "touchbase", "touchus", "touchbaseus",
+    "reach", "reachus", "reachout", "reachme", "reaching",
+    "inquire", "inquiry",
+    "letstalk", "let-s-talk", "letschat", "letscall", "letsconnect",
+    "talkus", "talktous", "talkwith", "talkwithus",
+    "chat", "chatus", "chatwith", "chatwithus",
+    "meet", "meetus", "meetwithus", "meetme",
+    "engage", "engagement", "engageus",
+    "workwith", "workwithus",
+    "startchat", "startthechat", "startconversation",
     # Team / office
     "team", "theteam", "team-us", "admin", "administration", "office",
     "general", "inbox", "mail", "mailbox",
@@ -190,7 +204,12 @@ def is_generic(local_part: str, *, business_name: str = "") -> bool:
     # unaffected, but location-variant aliases are rejected).
     for prefix in ("contact", "hello", "sales", "support",
                    "admin", "office", "team", "help", "service",
-                   "reception", "billing", "intake"):
+                   "reception", "billing", "intake",
+                   # Engagement prefixes — connectnyc@, reachustoday@,
+                   # chatbainbridge@, meetsf@. Any of these + a short
+                   # location/variant suffix = shared inbox.
+                   "connect", "reach", "chat", "meet", "touch",
+                   "inquire", "engage", "talk"):
         if lp.startswith(prefix) and 0 < len(lp) - len(prefix) <= 4:
             return True
     # Compound generic (e.g. "info123", "contact-us-today", "team-sf")

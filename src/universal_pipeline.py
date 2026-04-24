@@ -1743,7 +1743,13 @@ def _triangulate_pattern(
         if "@" not in email:
             continue
         local = email.split("@")[0].lower()
-        if local in GENERIC_LOCALS:
+        # Use the canonical stopword checker — covers every variant
+        # the duplicate GENERIC_LOCALS set was missing (connect, reach,
+        # info-substring, practice-area compounds, etc.). A generic
+        # mailbox should never contribute to pattern votes since its
+        # local part isn't related to any DM's name.
+        from src.volume_mode.stopwords import is_generic as _is_generic_lp
+        if _is_generic_lp(local):
             continue
         for owner in owners:
             first = owner.first_name.lower()
@@ -2385,6 +2391,47 @@ def triangulate_email(
         result.time_seconds = round(time.time() - start, 2)
         _record_cache_savings(result, cache)
         return result
+
+    # LLM final gate — same Haiku picker volume mode uses. Catches
+    # semantic shared-inbox variants we haven't listed (new industries
+    # invent new ones: `connect@`, `engageus@`, `letstalk@`) AND
+    # wrong-person picks (jake@firm when DM is Matthew). One cached
+    # call per biz, ~$0.001.
+    if result.decision_maker and domain and eligible:
+        try:
+            from src.email_picker_llm import pick_email_with_llm
+            llm_result = pick_email_with_llm(
+                candidates=[{
+                    "email": c.get("email") or "",
+                    "bucket": c.get("source", ""),
+                    "pattern": c.get("pattern", ""),
+                    "nb_result": c.get("nb_result"),
+                } for c in eligible],
+                dm_name=result.decision_maker.full_name,
+                dm_title=getattr(result.decision_maker, "title", ""),
+                business_name=business_name, domain=domain, cache=cache,
+            )
+            if llm_result is not None:
+                picked_email, reason = llm_result
+                if picked_email is None:
+                    # Haiku: all candidates are shared inboxes or
+                    # wrong-person. Return empty with a clear reason.
+                    result.best_email = ""
+                    result.best_email_confidence = 0
+                    result.best_email_evidence = [
+                        f"⚫ LLM gate rejected every candidate: {reason}",
+                    ]
+                    result.safe_to_send = False
+                    result.time_seconds = round(time.time() - start, 2)
+                    _record_cache_savings(result, cache)
+                    return result
+                # Reorder so the LLM's pick is first
+                eligible = (
+                    [c for c in eligible if c.get("email") == picked_email]
+                    + [c for c in eligible if c.get("email") != picked_email]
+                )
+        except Exception as e:
+            logger.debug(f"triangulation LLM gate failed: {e}")
 
     top = eligible[0]
     # Skip bucket-D/E-style constructed candidates that came back
