@@ -281,7 +281,7 @@ if results:
                     items=pending,
                     worker_fn=_worker,
                     search_id=search_id,
-                    max_workers=6,
+                    max_workers=10,
                     metadata={"mode": "volume_oneclick", "search_label": label},
                 )
                 st.success(

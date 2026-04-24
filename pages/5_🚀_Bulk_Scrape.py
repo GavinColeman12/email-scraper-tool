@@ -172,7 +172,7 @@ with mode_col1:
     )
 with mode_col2:
     parallelism = st.slider(
-        "Parallel workers", 1, 12, 6,
+        "Parallel workers", 1, 12, 10,
         help="Higher = faster but more API pressure. 6 is safe for SearchApi.",
     )
 
