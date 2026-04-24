@@ -582,13 +582,49 @@ if send_safe_only:
             ]
             if review_biz:
                 est_cost = min(len(review_biz) * 0.009, 2.0)
+
+                # Show what we LEARNED from send-safe history — this
+                # is what drives rescue's pattern priority per vertical.
+                try:
+                    from src.learned_priors import summarize_for_ui
+                    lp = summarize_for_ui()
+                    if lp["total_samples"] >= 10:
+                        with st.expander(
+                            f"📊 Learned patterns from your "
+                            f"{lp['total_samples']} NB-valid sends — "
+                            "drives rescue priority per vertical"
+                        ):
+                            verticals = lp["verticals_with_data"]
+                            if verticals:
+                                for v, info in sorted(
+                                    verticals.items(),
+                                    key=lambda x: -x[1]["samples"],
+                                ):
+                                    top = " · ".join(
+                                        f"**{p}** ({pct:.0f}%)"
+                                        for p, _, pct in info["top_3"]
+                                    )
+                                    st.caption(
+                                        f"**{v}** ({info['samples']} "
+                                        f"samples) — {top}"
+                                    )
+                            else:
+                                st.caption(
+                                    "No vertical has 5+ samples yet — "
+                                    "using hardcoded fallback order "
+                                    "(flast, first, first.last)."
+                                )
+                except Exception:
+                    pass
+
                 rc1, rc2 = st.columns([3, 2])
                 with rc1:
                     st.caption(
                         f"💡 **{len(review_biz)} rows are in review or "
                         f"reverify** — rescue tries to upgrade them by "
                         f"re-NBing the email + testing up to 3 of the "
-                        f"highest-probability DM patterns. Est. cost: "
+                        f"highest-probability DM patterns "
+                        f"(learned per vertical). Est. cost: "
                         f"**~${est_cost:.2f}** (hard cap $2 per batch)."
                     )
                 with rc2:

@@ -49,31 +49,53 @@ DEFAULT_MAX_CANDIDATES = 3
 # ── Pattern generator — broader than the volume_mode priors ──────────
 # Ordered by "most likely to work" so we NB the good ones first and
 # stop as soon as one comes back valid.
+# Pattern name → (first, last, domain) → email generator.
+# Keep in sync with learned_priors.classify_pattern so learned names
+# can be translated back to email candidates.
+_PATTERN_BUILDERS = {
+    "first.last":   lambda f, l, d: f"{f}.{l}@{d}" if f and l else None,
+    "flast":        lambda f, l, d: f"{f[0]}{l}@{d}" if f and l else None,
+    "firstl":       lambda f, l, d: f"{f}{l[0]}@{d}" if f and l else None,
+    "first_last":   lambda f, l, d: f"{f}_{l}@{d}" if f and l else None,
+    "first-last":   lambda f, l, d: f"{f}-{l}@{d}" if f and l else None,
+    "last.first":   lambda f, l, d: f"{l}.{f}@{d}" if f and l else None,
+    "last_first":   lambda f, l, d: f"{l}_{f}@{d}" if f and l else None,
+    "lastfirst":    lambda f, l, d: f"{l}{f}@{d}" if f and l else None,
+    "first.l":      lambda f, l, d: f"{f}.{l[0]}@{d}" if f and l else None,
+    "f.last":       lambda f, l, d: f"{f[0]}.{l}@{d}" if f and l else None,
+    "fl":           lambda f, l, d: f"{f[0]}{l[0]}@{d}" if f and l else None,
+    "first":        lambda f, l, d: f"{f}@{d}" if f and len(f) >= 3 else None,
+    "last":         lambda f, l, d: f"{l}@{d}" if l and len(l) >= 4 else None,
+    "drlast":       lambda f, l, d: f"dr{l}@{d}" if l else None,
+    "dr.last":      lambda f, l, d: f"dr.{l}@{d}" if l else None,
+    "drfirst":      lambda f, l, d: f"dr{f}@{d}" if f else None,
+    "dr.first":     lambda f, l, d: f"dr.{f}@{d}" if f else None,
+    "doctorlast":   lambda f, l, d: f"doctor{l}@{d}" if l else None,
+}
+
+
 def _extended_patterns(first: str, last: str, domain: str,
                         vertical: str = "",
                         max_candidates: int = DEFAULT_MAX_CANDIDATES,
+                        learned_order: Optional[list[str]] = None,
                         ) -> list[tuple[str, str]]:
     """
-    Return the TOP `max_candidates` pattern guesses for this DM,
-    ordered by real-world hit rate.
+    Return the TOP `max_candidates` pattern guesses for this DM.
 
-    Priority order (universal — every vertical):
-      1. {first}.{last}   e.g. paula.wyatt@       ← #1 global convention
-      2. {f}{last}        e.g. pwyatt@            ← abbreviated variant
-      3. {first}          e.g. paula@             ← common at sole-prop
+    When `learned_order` is provided (from learned_priors), that's the
+    primary ordering — slotted in first. Remaining slots are filled
+    from a hardcoded fallback in case the learned list has fewer
+    entries than max_candidates.
 
-    Dental/medical bumps the doctor-prefix patterns in ahead of
-    {first} at slots 2-3:
-      1. {first}.{last}
-      2. dr.{last}        ← high hit rate for doctor-owned clinics
-      3. dr{last}          (drwyatt@ style, no separator)
+    Hardcoded fallback ordering (used when we don't have enough
+    historical data for the vertical):
+      Non-medical:  flast, first, first.last           (empirical)
+      Dental/med:   drlast, flast, first.last          (empirical)
 
-    Rescue INCLUDES {first}.{last} / {f}{last} in the priority list —
-    NOT every scrape tries them (priors.py varies by vertical). The
-    caller filters out already-tried emails via the already_tried
-    set built from evidence trail's candidate_emails, so rescue
-    effectively tries the highest-probability patterns not yet
-    tested.
+    These match what compute_learned_priors() returned on a real
+    96-sample dataset — flast is the #1 universal pattern at ~44%,
+    not first.last. The learner will override these as more campaigns
+    feed the training set.
     """
     f = (first or "").lower().strip()
     l = (last or "").lower().strip()
@@ -88,58 +110,47 @@ def _extended_patterns(first: str, last: str, domain: str,
                     "medspa", "aesthetic", "veterinar")
     )
 
-    patterns: list[tuple[str, str]] = []
-
-    # Slot 1 — universal #1: {first}.{last}. Highest hit rate across
-    # every vertical we've scraped.
-    if f and l:
-        patterns.append(("first.last", f"{f}.{l}@{d}"))
-
-    # Slot 2/3 depends on vertical
+    # Fallback hardcoded priority — when no learned data exists
     if is_medical:
-        # Dental/medical owner-doctors: "dr." + last name is the
-        # #1 non-standard pattern (confirmed by search 45 which had
-        # 6/18 rows win with dr{last}).
-        if l:
-            patterns.append(("dr.last", f"dr.{l}@{d}"))
-            patterns.append(("drlast", f"dr{l}@{d}"))
-        if f and l:
-            patterns.append(("flast", f"{f[0]}{l}@{d}"))
-        if f:
-            patterns.append(("first", f"{f}@{d}"))
+        hardcoded = ["drlast", "flast", "first.last", "dr.last",
+                     "doctorlast", "first", "first_last", "last.first",
+                     "drfirst", "dr.first", "first-last", "last",
+                     "firstl", "f.last", "first.l", "fl"]
     else:
-        # Non-medical: {f}{last} then {first}@ as the universal 2-3.
-        if f and l:
-            patterns.append(("flast", f"{f[0]}{l}@{d}"))
-        if f:
-            patterns.append(("first", f"{f}@{d}"))
+        hardcoded = ["flast", "first", "first.last", "first_last",
+                     "last.first", "first-last", "last", "firstl",
+                     "f.last", "first.l", "fl"]
 
-    # Lower-priority slots — only reached when max_candidates > 3
-    # (our default is 3, so these rarely fire). Kept in the list so
-    # callers that want a deeper pass can bump the cap.
-    if f and l:
-        patterns.append(("first_last", f"{f}_{l}@{d}"))       # underscore
-        patterns.append(("last.first", f"{l}.{f}@{d}"))       # reversed
-        if is_medical:
-            patterns.append(("doctorlast", f"doctor{l}@{d}"))
-            patterns.append(("drfirst", f"dr{f}@{d}"))
-        patterns.append(("first-last", f"{f}-{l}@{d}"))       # hyphen
-        if l and len(l) >= 4:
-            patterns.append(("last", f"{l}@{d}"))
-        patterns.append(("firstl", f"{f}{l[0]}@{d}"))         # first-initial
-        patterns.append(("fl", f"{f[0]}{l[0]}@{d}"))          # initials
+    # Priority = learned_order first (if given), then hardcoded filler
+    priority_names: list[str] = []
+    seen_names: set = set()
+    for name in (learned_order or []):
+        if name not in seen_names:
+            priority_names.append(name)
+            seen_names.add(name)
+    for name in hardcoded:
+        if name not in seen_names:
+            priority_names.append(name)
+            seen_names.add(name)
 
-    # Dedup while preserving priority order
-    seen = set()
-    unique: list[tuple[str, str]] = []
-    for name, email in patterns:
-        if email in seen:
+    # Build the email candidates in priority order
+    patterns: list[tuple[str, str]] = []
+    seen_emails: set = set()
+    for name in priority_names:
+        builder = _PATTERN_BUILDERS.get(name)
+        if not builder:
             continue
-        seen.add(email)
-        unique.append((name, email))
-        if len(unique) >= max_candidates:
+        try:
+            candidate = builder(f, l, d)
+        except Exception:
+            candidate = None
+        if not candidate or candidate in seen_emails:
+            continue
+        seen_emails.add(candidate)
+        patterns.append((name, candidate))
+        if len(patterns) >= max_candidates:
             break
-    return unique
+    return patterns
 
 
 # ── Rescue result ─────────────────────────────────────────────────────
@@ -266,8 +277,23 @@ def rescue_review_row(
         if email:
             already_tried.add(email)
 
+        # Consult learned priors — if we have enough NB-valid history
+        # for this vertical, use its top patterns instead of the
+        # hardcoded fallback order.
+        learned_order: list = []
+        try:
+            from src.learned_priors import top_patterns_for_vertical
+            from src.dashboard_queries import normalize_vertical
+            vertical_bucket = normalize_vertical(business_type)
+            learned_order = top_patterns_for_vertical(
+                vertical_bucket, top_n=5,
+            )
+        except Exception:
+            learned_order = []
+
         new_patterns = _extended_patterns(
             dm_first, dm_last, domain, vertical=business_type,
+            learned_order=learned_order,
         )
         # Skip ones we've already tried
         new_patterns = [(n, e) for n, e in new_patterns

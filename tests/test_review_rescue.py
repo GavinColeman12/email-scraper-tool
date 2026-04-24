@@ -30,29 +30,59 @@ def test_extended_patterns_caller_can_raise_cap():
     assert len(pats) > 3
 
 
-def test_extended_patterns_universal_priority_order():
-    """Non-medical: {first}.{last}, {f}{last}, {first}@ — the three
-    highest-hit-rate patterns across every non-medical vertical."""
+def test_extended_patterns_hardcoded_non_medical_order():
+    """No learned data → hardcoded empirical order: flast, first, first.last.
+    flast is the global #1 at 44% hit rate (learned from 96 samples)."""
     pats = _extended_patterns("paula", "wyatt", "firm.com",
                                 vertical="law firm", max_candidates=3)
     emails = [e for _, e in pats]
-    assert emails[0] == "paula.wyatt@firm.com"
-    assert emails[1] == "pwyatt@firm.com"
-    assert emails[2] == "paula@firm.com"
+    assert emails[0] == "pwyatt@firm.com"      # flast
+    assert emails[1] == "paula@firm.com"        # first
+    assert emails[2] == "paula.wyatt@firm.com"  # first.last
 
 
-def test_extended_patterns_dental_priority_order():
-    """Dental/medical: {first}.{last} still #1, then dr.{last}, then
-    dr{last} — doctor-prefix patterns bump ahead of {first}@ for the
-    medical verticals (search 45 had 6/18 wins via dr{last})."""
+def test_extended_patterns_hardcoded_dental_order():
+    """Dental hardcoded fallback: drlast, flast, first.last — matches
+    the 15-sample learned distribution."""
     pats = _extended_patterns(
         "keenan", "fischman", "firm.com", vertical="dentist",
         max_candidates=3,
     )
     emails = [e for _, e in pats]
-    assert emails[0] == "keenan.fischman@firm.com"
-    assert emails[1] == "dr.fischman@firm.com"
-    assert emails[2] == "drfischman@firm.com"
+    assert emails[0] == "drfischman@firm.com"        # drlast
+    assert emails[1] == "kfischman@firm.com"         # flast
+    assert emails[2] == "keenan.fischman@firm.com"   # first.last
+
+
+def test_extended_patterns_respects_learned_order():
+    """When learned_order is provided, it overrides the hardcoded
+    order. Caller in production passes what compute_learned_priors
+    returned for this vertical."""
+    pats = _extended_patterns(
+        "paula", "wyatt", "firm.com",
+        vertical="law firm", max_candidates=3,
+        learned_order=["first.last", "first_last", "last.first"],
+    )
+    emails = [e for _, e in pats]
+    assert emails[0] == "paula.wyatt@firm.com"
+    assert emails[1] == "paula_wyatt@firm.com"
+    assert emails[2] == "wyatt.paula@firm.com"
+
+
+def test_extended_patterns_learned_order_fills_with_hardcoded():
+    """Learned list has only 2 entries; slot 3 fills from hardcoded."""
+    pats = _extended_patterns(
+        "paula", "wyatt", "firm.com",
+        vertical="law firm", max_candidates=3,
+        learned_order=["first_last", "last.first"],
+    )
+    emails = [e for _, e in pats]
+    assert emails[0] == "paula_wyatt@firm.com"
+    assert emails[1] == "wyatt.paula@firm.com"
+    # Slot 3: hardcoded top-3 minus what's already in learned
+    # Hardcoded non-medical: flast, first, first.last → first not in
+    # learned → pwyatt@firm.com (flast) fills slot 3
+    assert emails[2] == "pwyatt@firm.com"
 
 
 def test_extended_patterns_non_medical_skips_dr():
