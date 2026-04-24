@@ -159,7 +159,8 @@ def pick_best(
     return None
 
 
-def confidence_tier(winner: Optional[Candidate]) -> str:
+def confidence_tier(winner: Optional[Candidate], *,
+                    cms_catchall_hint: str = "keep") -> str:
     """
     Map the winning candidate to a tier the shared Badge logic understands.
 
@@ -182,6 +183,12 @@ def confidence_tier(winner: Optional[Candidate]) -> str:
     # NB-unknown specifically — we asked NB, it couldn't say. For cold
     # outreach at scale that's a bounce risk we shouldn't auto-send into.
     if winner.nb_result == "unknown":
+        return TIER_REVIEW
+    # NB-catchall + CMS-suspect (Squarespace with Google Workspace,
+    # Webflow with custom mail): the catchall verdict is suspicious —
+    # the specific mailbox might actually exist. Push to REVIEW so the
+    # operator evaluates before sending instead of lumping into scraped.
+    if winner.nb_result == "catchall" and cms_catchall_hint == "review":
         return TIER_REVIEW
     if winner.bucket in ("a", "b", "c"):
         return TIER_SCRAPED

@@ -57,6 +57,14 @@ def reset_run_budget(cap_usd: float = BUDGET_PER_RUN_DEFAULT_USD) -> None:
     global _RUN_COST_USD, _RUN_BUDGET_CAP
     _RUN_COST_USD = 0.0
     _RUN_BUDGET_CAP = cap_usd
+    # Also reset the per-run domain pattern cache — cross-run bleed
+    # would let yesterday's "kazi.law = {f}{last}" influence today's
+    # unrelated biz on the same domain (edge case, cheap to prevent).
+    try:
+        from src.free_signals import clear_domain_cache
+        clear_domain_cache()
+    except Exception:
+        pass
 
 
 _RUN_BUDGET_CAP = BUDGET_PER_RUN_DEFAULT_USD
@@ -175,11 +183,95 @@ def scrape_volume(
     except Exception as e:
         logger.warning(f"volume website_scrape: {e}")
 
+    # ── Phase 1.3: Free-signal harvesters (WHOIS / LinkedIn slug /
+    # footer / meta / CMS). Zero network beyond WHOIS (rdap.org), which
+    # is free and cached 90d. Each returns dicts convertible to
+    # OwnerCandidate so the synthesizer merges them uniformly.
+    result.agents_run.append("free_signals")
+    try:
+        from src.free_signals import (
+            whois_registrant_names, linkedin_slug_names,
+            meta_author_names, footer_lastname_signals,
+            get_domain_pattern,
+        )
+        from src.cms_detector import detect_cms, catchall_adjustment
+
+        # WHOIS registrant — big signal on sole-proprietor domains.
+        # Free; rdap.org; cached 90 days.
+        try:
+            wh_cands = whois_registrant_names(domain, cache)
+            if wh_cands:
+                all_candidates.extend([
+                    OwnerCandidate(**c) for c in wh_cands
+                ])
+                result.agents_succeeded.append("whois_registrant")
+        except Exception as e:
+            logger.debug(f"whois_registrant: {e}")
+
+        # Fetch the homepage ONCE for CMS/LinkedIn-slug/meta/footer.
+        # Cached 14 days so re-runs are free. website_scrape's own
+        # _fetch uses a separate path cache but the cost delta is
+        # ~30ms per biz at worst.
+        homepage_html = ""
+        cache_key_hp = ("homepage_html", domain)
+        cached_hp = cache.get(*cache_key_hp)
+        if cached_hp is not None:
+            homepage_html = cached_hp or ""
+        else:
+            try:
+                import requests as _req
+                _r = _req.get(
+                    website if website.startswith("http") else f"https://{domain}/",
+                    timeout=8,
+                    headers={"User-Agent": "Mozilla/5.0 (volume-mode/1.0)"},
+                    allow_redirects=True,
+                )
+                if _r.status_code == 200 and "text/html" in _r.headers.get("content-type", ""):
+                    homepage_html = _r.text[:500_000]  # cap at 500KB
+            except Exception:
+                pass
+            cache.set(cache_key_hp[0], homepage_html, cache_key_hp[1])
+
+        if homepage_html:
+            for c in linkedin_slug_names(homepage_html, domain):
+                all_candidates.append(OwnerCandidate(**c))
+            for c in meta_author_names(homepage_html):
+                all_candidates.append(OwnerCandidate(**c))
+
+            # Footer last-name signals → pattern evidence, not candidates
+            footer_surnames = footer_lastname_signals(homepage_html)
+            if footer_surnames:
+                result.evidence_trail["footer_surnames"] = footer_surnames
+
+            # CMS fingerprint — stashed for later NB interpretation
+            cms_fp = detect_cms(homepage_html)
+            if cms_fp:
+                result.evidence_trail["cms"] = {
+                    "cms": cms_fp.cms,
+                    "confidence": cms_fp.confidence,
+                    "catchall_hint": cms_fp.catchall_hint,
+                    "provider_hint": cms_fp.provider_hint,
+                    "evidence": cms_fp.evidence,
+                }
+
+        # Per-run domain pattern cache — if another biz at the same
+        # domain already triangulated a pattern this run, inherit it.
+        inherited = get_domain_pattern(domain)
+        if inherited:
+            result.evidence_trail["pattern_inherited_from_run"] = inherited
+    except Exception as e:
+        logger.debug(f"free_signals phase: {e}")
+
     # ── Phase 2: Wayback (free, historical snapshots) ──
     if include_wayback and time.time() - t0 < 45:
         result.agents_run.append("wayback")
         try:
-            pages = fetch_wayback_pages(domain, max_snapshots=5, deadline_s=15)
+            # Recent snapshots + one per historical year (corporate
+            # redesigns scrub founder bios; 2018 often still has them).
+            pages = fetch_wayback_pages(
+                domain, max_snapshots=8, deadline_s=18,
+                historical_years=[2020, 2017],
+            )
             if pages:
                 result.agents_succeeded.append("wayback")
                 # Parse the same way _agent_website_scrape does, but inline
@@ -581,8 +673,40 @@ def scrape_volume(
         dm_name=dm_name, dm_title=dm_title,
         domain=domain, cache=cache,
     )
-    tier = confidence_tier(winner)
+    # CMS-aware tier: Squarespace/Webflow catchalls get pushed to REVIEW
+    # (they usually don't catchall, so the verdict is suspect); Wix /
+    # Shopify / GoDaddy builder catchalls are trusted as real.
+    cms_catchall_hint = "keep"
+    try:
+        from src.cms_detector import catchall_adjustment
+        cms_info = result.evidence_trail.get("cms") or {}
+        if cms_info:
+            # Reconstruct a lightweight object for catchall_adjustment
+            class _FP:
+                pass
+            fp = _FP()
+            fp.cms = cms_info.get("cms")
+            fp.catchall_hint = cms_info.get("catchall_hint", "unknown")
+            nudge, rationale = catchall_adjustment(fp)
+            cms_catchall_hint = nudge
+            result.evidence_trail["cms_nudge"] = {"nudge": nudge, "rationale": rationale}
+    except Exception:
+        pass
+    tier = confidence_tier(winner, cms_catchall_hint=cms_catchall_hint)
     result.confidence_tier = tier
+
+    # Per-run domain pattern cache — stash triangulation result for
+    # chains / multi-location biz that follow this one in the run.
+    try:
+        from src.free_signals import cache_domain_pattern
+        if result.detected_pattern:
+            cache_domain_pattern(domain, {
+                "pattern_name": result.detected_pattern.pattern_name,
+                "confidence": result.detected_pattern.confidence,
+                "method": result.detected_pattern.method,
+            })
+    except Exception:
+        pass
 
     # ── Post-pick DM correction ──
     # When the winning email's local part names a DIFFERENT provider than

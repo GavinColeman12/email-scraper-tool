@@ -41,10 +41,16 @@ MAX_SNAPSHOTS_PER_PATH = 3
 CDX_SLEEP_SECONDS = 0.4
 
 
-def _cdx_query(domain: str, path: str, limit: int = 3) -> list[tuple[str, str]]:
+def _cdx_query(domain: str, path: str, limit: int = 3,
+               from_year: Optional[int] = None,
+               to_year: Optional[int] = None) -> list[tuple[str, str]]:
     """
     Query the CDX API for the N most recent snapshots of {domain}{path}.
     Returns [(timestamp, original_url), ...]. Empty list on failure.
+
+    If from_year/to_year are provided, bound the search window — useful
+    for fetching historical snapshots (e.g. "team page as of 2019")
+    which often have founder bios the current site has scrubbed.
     """
     target = f"{domain.rstrip('/')}{path}"
     params = {
@@ -54,6 +60,10 @@ def _cdx_query(domain: str, path: str, limit: int = 3) -> list[tuple[str, str]]:
         "filter": "statuscode:200",
         "collapse": "timestamp:8",  # one per day
     }
+    if from_year:
+        params["from"] = f"{from_year}0101"
+    if to_year:
+        params["to"] = f"{to_year}1231"
     try:
         r = requests.get(CDX_URL, params=params, timeout=6)
         if r.status_code != 200:
@@ -73,12 +83,19 @@ def _cdx_query(domain: str, path: str, limit: int = 3) -> list[tuple[str, str]]:
 
 def fetch_wayback_pages(
     domain: str, *, max_snapshots: int = 10, deadline_s: float = 20.0,
+    historical_years: Optional[list[int]] = None,
 ) -> list[tuple[str, str]]:
     """
-    Fetch recent Wayback snapshots of team/about pages for a domain.
+    Fetch Wayback snapshots of team/about pages for a domain.
 
     Returns [(url, html), ...]. Caller processes them the same as live
     pages — name extraction, email regex, etc.
+
+    By default fetches the most-recent snapshots. Pass
+    `historical_years=[2024, 2021, 2018]` to ALSO grab one snapshot per
+    historical year — corporate redesigns scrub founder bios, and the
+    2018 version often still has "Founded by Jane Smith in 2010" where
+    the 2024 site dropped it.
 
     Free. Rate-limited to be polite. Respects a wall-clock deadline so
     it never blocks the caller for more than ~20s regardless of how
@@ -94,6 +111,15 @@ def fetch_wayback_pages(
     t_start = time.time()
     cdx_calls = 0
 
+    # Build the list of (year_range_or_None, limit_per_path) queries:
+    # None = most-recent; (year, year) = one snapshot in that year.
+    year_queries: list[tuple[Optional[tuple[int, int]], int]] = [
+        (None, MAX_SNAPSHOTS_PER_PATH),  # recent
+    ]
+    if historical_years:
+        for y in historical_years:
+            year_queries.append(((y, y), 1))
+
     for path in WAYBACK_TARGET_PATHS:
         if len(out) >= max_snapshots:
             break
@@ -101,25 +127,36 @@ def fetch_wayback_pages(
             break
         if time.time() - t_start > deadline_s:
             break
-        snaps = _cdx_query(domain_stripped, path, limit=MAX_SNAPSHOTS_PER_PATH)
-        cdx_calls += 1
-        time.sleep(CDX_SLEEP_SECONDS)
-        for ts, original in snaps:
+
+        for yr_range, per_path_limit in year_queries:
             if len(out) >= max_snapshots:
+                break
+            if cdx_calls >= MAX_CDX_CALLS_PER_DOMAIN:
                 break
             if time.time() - t_start > deadline_s:
                 break
-            snap_url = WAYBACK_PREFIX.format(ts=ts, url=original)
-            if snap_url in seen_urls:
-                continue
-            seen_urls.add(snap_url)
-            try:
-                r = requests.get(snap_url, timeout=7, headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; volume-mode/1.0)",
-                })
-                if r.status_code == 200 and "text/html" in r.headers.get("content-type", ""):
-                    out.append((snap_url, r.text))
-            except Exception:
-                continue
+            fy, ty = (yr_range if yr_range else (None, None))
+            snaps = _cdx_query(domain_stripped, path,
+                                limit=per_path_limit,
+                                from_year=fy, to_year=ty)
+            cdx_calls += 1
             time.sleep(CDX_SLEEP_SECONDS)
+            for ts, original in snaps:
+                if len(out) >= max_snapshots:
+                    break
+                if time.time() - t_start > deadline_s:
+                    break
+                snap_url = WAYBACK_PREFIX.format(ts=ts, url=original)
+                if snap_url in seen_urls:
+                    continue
+                seen_urls.add(snap_url)
+                try:
+                    r = requests.get(snap_url, timeout=7, headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; volume-mode/1.0)",
+                    })
+                    if r.status_code == 200 and "text/html" in r.headers.get("content-type", ""):
+                        out.append((snap_url, r.text))
+                except Exception:
+                    continue
+                time.sleep(CDX_SLEEP_SECONDS)
     return out
