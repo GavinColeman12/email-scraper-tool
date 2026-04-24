@@ -30,30 +30,29 @@ def test_extended_patterns_caller_can_raise_cap():
     assert len(pats) > 3
 
 
-def test_extended_patterns_law_priority_order():
-    """Non-medical: first_last, last.first, first@ take priority —
-    those have the highest hit rate across legal/tech firms."""
+def test_extended_patterns_universal_priority_order():
+    """Non-medical: {first}.{last}, {f}{last}, {first}@ — the three
+    highest-hit-rate patterns across every non-medical vertical."""
     pats = _extended_patterns("paula", "wyatt", "firm.com",
                                 vertical="law firm", max_candidates=3)
     emails = [e for _, e in pats]
-    assert emails[0] == "paula_wyatt@firm.com"
-    assert emails[1] == "wyatt.paula@firm.com"
-    # Third slot: first@ or last@ (either works — both are reasonable
-    # for sole-prop / small firms)
-    assert emails[2] in ("paula@firm.com", "wyatt@firm.com")
+    assert emails[0] == "paula.wyatt@firm.com"
+    assert emails[1] == "pwyatt@firm.com"
+    assert emails[2] == "paula@firm.com"
 
 
 def test_extended_patterns_dental_priority_order():
-    """Dental/medical: dr.last is the #1 guess — massive hit rate on
-    doctor-owned clinics (search 45 confirmed)."""
+    """Dental/medical: {first}.{last} still #1, then dr.{last}, then
+    dr{last} — doctor-prefix patterns bump ahead of {first}@ for the
+    medical verticals (search 45 had 6/18 wins via dr{last})."""
     pats = _extended_patterns(
         "keenan", "fischman", "firm.com", vertical="dentist",
         max_candidates=3,
     )
     emails = [e for _, e in pats]
-    assert emails[0] == "dr.fischman@firm.com"
-    # dr{first} and doctor{last} fill the remaining 2 slots
-    assert "drkeenan@firm.com" in emails or "doctorfischman@firm.com" in emails
+    assert emails[0] == "keenan.fischman@firm.com"
+    assert emails[1] == "dr.fischman@firm.com"
+    assert emails[2] == "drfischman@firm.com"
 
 
 def test_extended_patterns_non_medical_skips_dr():

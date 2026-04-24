@@ -594,10 +594,11 @@ if send_safe_only:
                 with rc2:
                     if st.button(
                         f"🚑 Rescue {len(review_biz)} review rows",
-                        help="Max 3 NB calls per row (~$0.009). Dental/"
-                             "medical rows try dr.last, drfirst, doctorlast "
-                             "first. Other verticals try first_last, "
-                             "last.first, first@. Budget: $0.009/row, "
+                        help="Max 3 NB calls per row (~$0.009). Tries the "
+                             "top-3 highest-probability DM patterns not "
+                             "already tested: {first}.{last}, {f}{last}, "
+                             "{first}@. Dental/medical swaps slots 2-3 "
+                             "to dr.{last} + dr{last}. Budget: $0.009/row, "
                              "$2 total cap.",
                     ):
                         from src.review_rescue import bulk_rescue

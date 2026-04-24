@@ -55,17 +55,25 @@ def _extended_patterns(first: str, last: str, domain: str,
                         ) -> list[tuple[str, str]]:
     """
     Return the TOP `max_candidates` pattern guesses for this DM,
-    ordered by real-world hit rate. The full list has ~15 variants;
-    we slice the most-likely ones so each review row costs at most
-    `max_candidates` NB calls ($0.003 each).
+    ordered by real-world hit rate.
 
-    Priority order by vertical:
-      - Dental / medical: dr.{last}, dr{last}, doctor{last}, {first}_{last}
-      - Everyone else:    {first}_{last}, {last}.{first}, {first}, {last}
+    Priority order (universal — every vertical):
+      1. {first}.{last}   e.g. paula.wyatt@       ← #1 global convention
+      2. {f}{last}        e.g. pwyatt@            ← abbreviated variant
+      3. {first}          e.g. paula@             ← common at sole-prop
 
-    Excludes {first}.{last}, {f}{last}, {first}{l} since those are
-    already tried in the first scrape pass — rescue runs AFTER those
-    bounced, so re-NBing them would burn budget on known-bad guesses.
+    Dental/medical bumps the doctor-prefix patterns in ahead of
+    {first} at slots 2-3:
+      1. {first}.{last}
+      2. dr.{last}        ← high hit rate for doctor-owned clinics
+      3. dr{last}          (drwyatt@ style, no separator)
+
+    Rescue INCLUDES {first}.{last} / {f}{last} in the priority list —
+    NOT every scrape tries them (priors.py varies by vertical). The
+    caller filters out already-tried emails via the already_tried
+    set built from evidence trail's candidate_emails, so rescue
+    effectively tries the highest-probability patterns not yet
+    tested.
     """
     f = (first or "").lower().strip()
     l = (last or "").lower().strip()
@@ -82,42 +90,44 @@ def _extended_patterns(first: str, last: str, domain: str,
 
     patterns: list[tuple[str, str]] = []
 
-    # Highest-priority patterns go FIRST so that with max_candidates=3
-    # we always NB the most promising ones.
+    # Slot 1 — universal #1: {first}.{last}. Highest hit rate across
+    # every vertical we've scraped.
+    if f and l:
+        patterns.append(("first.last", f"{f}.{l}@{d}"))
 
-    # Dental/medical prefix — empirically high hit rate on doctor-owned
-    # clinics, first-line guess for that vertical
-    if is_medical and l:
-        patterns.append(("dr.last", f"dr.{l}@{d}"))
+    # Slot 2/3 depends on vertical
+    if is_medical:
+        # Dental/medical owner-doctors: "dr." + last name is the
+        # #1 non-standard pattern (confirmed by search 45 which had
+        # 6/18 rows win with dr{last}).
+        if l:
+            patterns.append(("dr.last", f"dr.{l}@{d}"))
+            patterns.append(("drlast", f"dr{l}@{d}"))
+        if f and l:
+            patterns.append(("flast", f"{f[0]}{l}@{d}"))
         if f:
+            patterns.append(("first", f"{f}@{d}"))
+    else:
+        # Non-medical: {f}{last} then {first}@ as the universal 2-3.
+        if f and l:
+            patterns.append(("flast", f"{f[0]}{l}@{d}"))
+        if f:
+            patterns.append(("first", f"{f}@{d}"))
+
+    # Lower-priority slots — only reached when max_candidates > 3
+    # (our default is 3, so these rarely fire). Kept in the list so
+    # callers that want a deeper pass can bump the cap.
+    if f and l:
+        patterns.append(("first_last", f"{f}_{l}@{d}"))       # underscore
+        patterns.append(("last.first", f"{l}.{f}@{d}"))       # reversed
+        if is_medical:
+            patterns.append(("doctorlast", f"doctor{l}@{d}"))
             patterns.append(("drfirst", f"dr{f}@{d}"))
-        patterns.append(("doctorlast", f"doctor{l}@{d}"))
-        if f:
-            patterns.append(("dr.first", f"dr.{f}@{d}"))
-
-    # Underscore separator — very common at corporate chains
-    # (aspendental, mydrdental, absolutedental all use it)
-    if f and l:
-        patterns.append(("first_last", f"{f}_{l}@{d}"))
-
-    # Reversed order — common at small firms where the last name
-    # forms the domain
-    if f and l:
-        patterns.append(("last.first", f"{l}.{f}@{d}"))
-
-    # Single-name patterns — distinctive first / last names
-    if f and len(f) >= 4:
-        patterns.append(("first", f"{f}@{d}"))
-    if l and len(l) >= 4:
-        patterns.append(("last", f"{l}@{d}"))
-
-    # Hyphen separator + other initial variants — lower priority
-    if f and l:
-        patterns.append(("first-last", f"{f}-{l}@{d}"))
-        patterns.append(("last_first", f"{l}_{f}@{d}"))
-        patterns.append(("f.last", f"{f[0]}.{l}@{d}"))
-        patterns.append(("first.l", f"{f}.{l[0]}@{d}"))
-        patterns.append(("fl", f"{f[0]}{l[0]}@{d}"))
+        patterns.append(("first-last", f"{f}-{l}@{d}"))       # hyphen
+        if l and len(l) >= 4:
+            patterns.append(("last", f"{l}@{d}"))
+        patterns.append(("firstl", f"{f}{l[0]}@{d}"))         # first-initial
+        patterns.append(("fl", f"{f[0]}{l[0]}@{d}"))          # initials
 
     # Dedup while preserving priority order
     seen = set()
