@@ -96,10 +96,38 @@ MODE_HELP = {
 
 st.set_page_config(page_title="Replay", page_icon="🔁", layout="wide")
 st.title("🔁 Replay — inspect & compare runs")
+
+with st.expander("ℹ️ How Replay works (read me first)", expanded=False):
+    st.markdown(
+        """
+**Replay re-runs a past search through today's pipeline** so you can see
+how scraper changes affect results — without spending more SearchApi
+credits (Phase 1-3 caches live 14-90 days).
+
+**Three tabs, three jobs:**
+
+- **🆕 Run a replay** — kick off a new replay against any past search.
+  Pick the search, pick the mode (volume / triangulation / etc.), give
+  it a label (e.g. `post-NPI-fix`), hit Go. Past replays appear in a
+  table at the bottom — click any row to jump to inspect or compare.
+
+- **🔍 Inspect one replay** — see every business in a single replay
+  with the WHY column explaining each decision. Export send-safe rows,
+  empty rows, or the full set as CSV. Your selection persists if you
+  navigate to other pages and come back.
+
+- **⚖️ Compare two replays** — diff two replays of the same search to
+  see what your pipeline changes did: 🟢 newly caught, ⚪ stable, 🔴
+  regressed, ⚫ still empty. Download the wins as CSV (the rows the
+  new run caught that the old missed).
+
+**Cost:** ~$0 per replay. Safe to run as many as you want.
+"""
+    )
+
 st.caption(
-    "Re-runs the triangulation pipeline against a past search and explains "
-    "every decision. Near-zero cost (Phase 1–3 caches live 14–90 days). "
-    "Use it to verify logic changes before running a live campaign."
+    "Re-runs the pipeline against a past search and explains every "
+    "decision. Use it to verify logic changes before running a live campaign."
 )
 
 storage.init_db()
@@ -109,6 +137,16 @@ searches = storage.list_searches()
 if not searches:
     st.warning("No searches yet. Go to **🔎 Find Businesses** first.")
     st.stop()
+
+# Read deep-link params so the past-replays table can jump users to a
+# specific tab + replay (st.query_params persists across page navigation
+# inside the same Streamlit session).
+qp = st.query_params
+default_tab_idx = 0
+if qp.get("tab") == "inspect":
+    default_tab_idx = 1
+elif qp.get("tab") == "compare":
+    default_tab_idx = 2
 
 tab_new, tab_inspect, tab_compare = st.tabs([
     "🆕 Run a replay",
@@ -145,10 +183,10 @@ with tab_new:
         format_func=_fmt_search,
     )
     label = c2.text_input(
-        "Label", value="",
-        placeholder="baseline / post-bug-a-fix / retry-exhausted",
-        help="Short tag so you can find this replay later. "
-             "Good conventions: 'baseline-<date>', 'post-<fix>', 'retry-<scope>'.",
+        "Label (optional)", value="",
+        placeholder="leave blank for auto: replay-<mode>-<date>",
+        help="Optional tag. Leave blank and we auto-generate "
+             "'replay-<mode>-<YYYYMMDD-HHMM>' so the row is still searchable.",
     )
     limit = c3.number_input("Limit", min_value=0, value=0, step=5,
                             help="0 = replay every business in the search")
@@ -165,17 +203,20 @@ with tab_new:
              "same search (e.g. old triangulation vs new volume).",
     )
 
-    if st.button("🔁 Run replay", type="primary",
-                 disabled=not label.strip(),
-                 help="Labeled replays are searchable later; enter a label to enable."):
+    if st.button("🔁 Run replay", type="primary"):
+        from datetime import datetime as _dt
+        run_label = (
+            label.strip()
+            or f"replay-{mode}-{_dt.now().strftime('%Y%m%d-%H%M')}"
+        )
         with st.spinner(
-            f"Running {mode} replay… each biz takes ~30-60s. Progress "
-            "streams to the terminal. A 60-biz replay is ~30-45 min."
+            f"Running {mode} replay as '{run_label}'… each biz takes ~30-60s. "
+            "Progress streams to the terminal. A 60-biz replay is ~30-45 min."
         ):
             try:
                 replay_id = run_replay(
                     search_id=int(search_id),
-                    label=label.strip() or "replay",
+                    label=run_label,
                     limit=int(limit) if limit else None,
                     verbose=False,
                     mode=mode,
@@ -220,6 +261,49 @@ with tab_new:
                          "Pattern %": st.column_config.NumberColumn(format="%.1f%%"),
                      })
 
+        # Navigation hub — pick a replay and jump to Inspect or Compare
+        st.markdown("##### Open a past replay")
+        nav_labels = {r["id"]: f"#{r['id']} · {r.get('mode') or 'triangulation'} "
+                                f"· {r.get('label') or 'unlabeled'} "
+                                f"(search {r['original_search_id']})"
+                       for r in replays[:50]}
+        nc1, nc2 = st.columns([3, 2])
+        with nc1:
+            jump_id = st.selectbox(
+                "Replay",
+                options=list(nav_labels.keys()),
+                format_func=lambda k: nav_labels[k],
+                key="_run_tab_nav_pick",
+            )
+        with nc2:
+            jc1, jc2 = st.columns(2)
+            if jc1.button("🔍 Inspect", use_container_width=True):
+                st.query_params["tab"] = "inspect"
+                st.query_params["inspect_id"] = str(jump_id)
+                st.rerun()
+            # Default Compare partner: most recent prior replay of same search
+            same = [r for r in replays
+                    if r["original_search_id"] == next(
+                        (rr["original_search_id"] for rr in replays
+                         if rr["id"] == jump_id), None
+                    )
+                    and r["id"] != jump_id]
+            if jc2.button(
+                "⚖️ Compare", use_container_width=True,
+                disabled=not same,
+                help="Diff against the most recent prior replay of the "
+                     "same search. Disabled when no prior replay exists.",
+            ):
+                # Pick the most recent partner
+                partner = sorted(
+                    same, key=lambda r: r.get("created_at") or "",
+                    reverse=True,
+                )[0]
+                st.query_params["tab"] = "compare"
+                st.query_params["cmp_a"] = str(partner["id"])
+                st.query_params["cmp_b"] = str(jump_id)
+                st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 2 — Inspect a single replay
@@ -238,12 +322,27 @@ with tab_inspect:
                 f"· {sm.get('biz_count') or 0} biz · {r.get('label') or '?'} "
                 f"(search {r['original_search_id']})")
     rep_labels = {r["id"]: _fmt_rep(r) for r in replays}
+
+    # Persist selection across navigation via query_params + session_state.
+    # Priority: ?inspect_id=N URL param > prior session state > newest replay.
+    qp_inspect = qp.get("inspect_id")
+    if qp_inspect:
+        try:
+            qp_id = int(qp_inspect)
+            if qp_id in rep_labels:
+                st.session_state["_inspect_pick"] = qp_id
+        except Exception:
+            pass
+
     inspect_id = st.selectbox(
         "Pick a replay to inspect",
         options=list(rep_labels.keys()),
         format_func=lambda k: rep_labels[k],
         key="_inspect_pick",
+        help="Selection persists if you navigate to another page and come back.",
     )
+    # Mirror selection into URL so refreshes / back-button preserve it
+    st.query_params["inspect_id"] = str(inspect_id)
 
     full = get_replay(int(inspect_id))
     if not full:
@@ -329,6 +428,143 @@ with tab_inspect:
         "column compact-lists every email the pipeline built and its NB verdict."
     )
 
+    # ── Inspect-tab downloads ──────────────────────────────────────────
+    # Build a richer export shape (with biz address / phone / website
+    # from storage) so the CSV is self-contained for outreach tooling.
+    st.divider()
+    st.subheader("📥 Download from this replay")
+    st.caption(
+        "Export rows from the current replay (no diff). Use Compare "
+        "for the 'newly caught vs old run' diff exports."
+    )
+
+    inspect_search_id = full.get("original_search_id")
+    biz_lookup_inspect: dict = {}
+    if inspect_search_id:
+        for biz in storage.list_businesses(search_id=int(inspect_search_id)):
+            biz_lookup_inspect[biz["id"]] = biz
+
+    def _inspect_export_row(row_replay: dict) -> dict:
+        """Single-replay export row — same schema as Compare for
+        downstream consistency, but Before/After collapse into one
+        Email column since there's no diff here."""
+        biz_id = row_replay.get("business_id")
+        biz = biz_lookup_inspect.get(biz_id) or {}
+        dm = (row_replay.get("decision_maker") or {}) if row_replay.get("decision_maker") else {}
+        return {
+            "Business": row_replay.get("business_name") or biz.get("business_name") or "",
+            "Address": biz.get("address") or "",
+            "Phone": biz.get("phone") or "",
+            "Website": biz.get("website") or row_replay.get("website") or "",
+            "Email": row_replay.get("best_email") or "",
+            "NB result": (row_replay.get("best_email_nb_result") or "").lower() or "—",
+            "DM name": dm.get("full_name") or "",
+            "DM title": dm.get("title") or "",
+            "Tier": (row_replay.get("confidence_tier") or "").replace("volume_", ""),
+            "Business ID": biz_id,
+        }
+
+    # Bucket every row by send-readiness
+    nb_valid_rows = []        # Send-safe today
+    found_rows = []           # Has any email (NB-valid + others)
+    empty_rows = []           # Zero candidates produced
+    all_rows = []
+    for row in businesses:
+        rep = row.get("replay") or {}
+        export = _inspect_export_row(rep)
+        all_rows.append(export)
+        if rep.get("best_email"):
+            found_rows.append(export)
+            if (rep.get("best_email_nb_result") or "").lower() == "valid":
+                nb_valid_rows.append(export)
+        else:
+            empty_rows.append(export)
+
+    rid = full["id"]
+    dl1, dl2, dl3, dl4 = st.columns(4)
+    with dl1:
+        st.download_button(
+            f"🟢 Send-safe NB-valid ({len(nb_valid_rows)})",
+            data=_csv_bytes(nb_valid_rows),
+            file_name=f"replay_{rid}_send_safe.csv",
+            mime="text/csv",
+            disabled=not nb_valid_rows,
+            type="primary",
+            help="Rows where NB confirmed the email is valid. "
+                 "Drop straight into outreach.",
+        )
+    with dl2:
+        st.download_button(
+            f"📧 All with email ({len(found_rows)})",
+            data=_csv_bytes(found_rows),
+            file_name=f"replay_{rid}_with_email.csv",
+            mime="text/csv",
+            disabled=not found_rows,
+            help="Every row that produced an email — includes "
+                 "catchall, unknown, and untested. Review NB column.",
+        )
+    with dl3:
+        st.download_button(
+            f"📦 All rows ({len(all_rows)})",
+            data=_csv_bytes(all_rows),
+            file_name=f"replay_{rid}_all.csv",
+            mime="text/csv",
+            disabled=not all_rows,
+            help="Full replay — every business including empties. "
+                 "Useful for review + manual research.",
+        )
+    with dl4:
+        st.download_button(
+            f"⚫ Empty rows ({len(empty_rows)})",
+            data=_csv_bytes(empty_rows),
+            file_name=f"replay_{rid}_empty.csv",
+            mime="text/csv",
+            disabled=not empty_rows,
+            help="Rows where the pipeline found no email. "
+                 "Candidates for manual research / phone outreach.",
+        )
+
+    # ── Quick-compare shortcut ─────────────────────────────────────────
+    st.divider()
+    st.subheader("⚖️ Compare this replay to another")
+    st.caption(
+        "Diff this replay against another to see which rows the new "
+        "run caught vs the old. Auto-suggests the most recent prior "
+        "replay of the same search."
+    )
+
+    same_search_replays = [
+        r for r in replays
+        if r["original_search_id"] == full["original_search_id"]
+        and r["id"] != full["id"]
+    ]
+    if same_search_replays:
+        # Sort newest first; default to the most recent one
+        prior = sorted(same_search_replays,
+                        key=lambda r: r.get("created_at") or "",
+                        reverse=True)
+        prior_labels = {r["id"]: _fmt_rep(r) for r in prior}
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            other_id = st.selectbox(
+                "Compare against (other replay of same search)",
+                options=list(prior_labels.keys()),
+                format_func=lambda k: prior_labels[k],
+                key="_inspect_compare_pick",
+            )
+        with c2:
+            if st.button("🔁 Open in Compare tab", type="primary"):
+                # Set query params for both A and B and reload
+                st.query_params["tab"] = "compare"
+                st.query_params["cmp_a"] = str(other_id)
+                st.query_params["cmp_b"] = str(rid)
+                st.rerun()
+    else:
+        st.caption(
+            "No other replays exist for this search yet. Run a second "
+            "replay (different mode or after a code change) to compare."
+        )
+
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 3 — Compare two replays
@@ -347,13 +583,36 @@ with tab_compare:
                 f"· {r.get('label') or '?'} (search {r['original_search_id']})")
     rep_labels = {r["id"]: _fmt_rep_c(r) for r in replays}
 
+    # Honor deep-link from Inspect tab's "Open in Compare" button —
+    # cmp_a / cmp_b query params override the default selection.
+    qp_a = qp.get("cmp_a")
+    qp_b = qp.get("cmp_b")
+    if qp_a:
+        try:
+            qa = int(qp_a)
+            if qa in rep_labels:
+                st.session_state["_cmp_a"] = qa
+        except Exception:
+            pass
+    if qp_b:
+        try:
+            qb = int(qp_b)
+            if qb in rep_labels:
+                st.session_state["_cmp_b"] = qb
+        except Exception:
+            pass
+
     cc1, cc2 = st.columns(2)
     a_id = cc1.selectbox("Before (A)", options=list(rep_labels.keys()),
                          format_func=lambda k: rep_labels[k],
-                         index=min(1, len(replays)-1), key="_cmp_a")
+                         index=min(1, len(replays)-1), key="_cmp_a",
+                         help="Selection persists across page navigation.")
     b_id = cc2.selectbox("After (B)",  options=list(rep_labels.keys()),
                          format_func=lambda k: rep_labels[k],
                          index=0, key="_cmp_b")
+    # Mirror back into URL for stable navigation
+    st.query_params["cmp_a"] = str(a_id)
+    st.query_params["cmp_b"] = str(b_id)
     if a_id == b_id:
         st.warning("Pick two different replays."); st.stop()
 
