@@ -11,6 +11,9 @@ from src import storage
 from src.export_rows import build_rows, EXPORT_COLUMNS
 
 st.set_page_config(page_title="Export CSV", page_icon="📥", layout="wide")
+
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
 st.title("📥 Export to CSV")
 st.caption(
     "Download scraped businesses as a CSV formatted for import into the "

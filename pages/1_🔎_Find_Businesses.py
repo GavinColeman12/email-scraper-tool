@@ -9,6 +9,9 @@ from src import storage
 from src.maps_search import search_businesses, estimate_cost, SearchError, QUERY_SYNONYMS
 
 st.set_page_config(page_title="Find Businesses", page_icon="🔎", layout="wide")
+
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
 st.title("🔎 Find Businesses on Google Maps")
 
 storage.init_db()

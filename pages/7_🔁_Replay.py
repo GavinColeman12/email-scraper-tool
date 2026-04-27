@@ -95,6 +95,9 @@ MODE_HELP = {
 
 
 st.set_page_config(page_title="Replay", page_icon="🔁", layout="wide")
+
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
 st.title("🔁 Replay — inspect & compare runs")
 
 with st.expander("ℹ️ How Replay works (read me first)", expanded=False):

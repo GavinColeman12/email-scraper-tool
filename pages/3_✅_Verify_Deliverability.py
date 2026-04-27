@@ -15,6 +15,9 @@ from src.email_verifier import (
 from src.secrets import get_secret
 
 st.set_page_config(page_title="Re-verify Emails", page_icon="✅", layout="wide")
+
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
 st.title("✅ Re-verify Existing Emails (optional)")
 st.warning(
     "⚠️ **Bulk Scrape already verifies emails in-pipeline via NeverBounce.** "

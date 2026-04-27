@@ -13,6 +13,9 @@ from src.bounce_tracker import (
 from src.industry_patterns import INDUSTRY_PATTERN_PRIORS, get_patterns_for
 
 st.set_page_config(page_title="Pattern Learning", page_icon="📊", layout="wide")
+
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
 st.title("📊 Pattern Learning & Bounce Analytics")
 st.caption(
     "Tracks which email patterns actually land vs bounce vs reply. "

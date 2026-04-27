@@ -19,6 +19,9 @@ from src.export_rows import (
 )
 
 st.set_page_config(page_title="Bulk Scrape", page_icon="🚀", layout="wide")
+
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
 st.title("🚀 Bulk Scrape + Pick Top N")
 st.caption(
     "Run 200+ businesses in the background, score each lead 0-100 on quality, "

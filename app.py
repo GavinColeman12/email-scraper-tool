@@ -20,6 +20,9 @@ st.set_page_config(
     layout="wide",
 )
 
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
+
 storage.init_db()
 
 st.title("📧 Email Scraper — Dashboard")

@@ -13,6 +13,9 @@ from src.deep_scraper import deep_scrape_business_emails
 from src.secrets import get_secret
 
 st.set_page_config(page_title="Scrape Emails", page_icon="📧", layout="wide")
+
+from src.job_status_widget import render_jobs_sidebar
+render_jobs_sidebar()
 st.title("📧 Scrape Business Websites for Emails")
 
 storage.init_db()
