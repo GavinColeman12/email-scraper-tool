@@ -18,10 +18,9 @@ unchanged.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -34,7 +33,7 @@ from src.volume_mode.ranking import (
     Candidate, pick_best, confidence_tier,
     TIER_VERIFIED, TIER_SCRAPED, TIER_REVIEW, TIER_GUESS, TIER_EMPTY,
 )
-from src.volume_mode.stopwords import is_generic, email_is_generic
+from src.volume_mode.stopwords import is_generic
 from src.volume_mode.wayback import fetch_wayback_pages
 
 

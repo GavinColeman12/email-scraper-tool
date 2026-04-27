@@ -6,7 +6,6 @@ Daemon threads survive Streamlit page navigation. Progress writes to
 Postgres every item so any page can observe.
 """
 import json
-import os
 import threading
 import traceback
 import uuid

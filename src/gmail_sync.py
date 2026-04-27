@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import datetime, timezone
-from typing import Iterable, Optional
+from datetime import datetime
+from typing import Optional
 
 from src.storage import _connect, _cursor, _PARAM, USE_PG
 

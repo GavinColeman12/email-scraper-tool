@@ -21,9 +21,7 @@ OwnerCandidate dataclass shape (via dict).
 from __future__ import annotations
 
 import re
-from dataclasses import asdict
 from typing import Optional
-from urllib.parse import urlparse
 
 
 # ──────────────────────────────────────────────────────────────────────

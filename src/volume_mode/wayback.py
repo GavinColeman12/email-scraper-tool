@@ -15,7 +15,6 @@ Free, but respectfully rate-limited (0.5s between CDX calls).
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Optional
 
