@@ -188,28 +188,44 @@ def start(job_type: str, items: list, worker_fn,
 
     def _runner():
         completed = 0
+        # Manual executor — we can't use `with ThreadPoolExecutor(...)` because
+        # __exit__ calls shutdown(wait=True), which blocks cancellation.
+        # Need shutdown(wait=False, cancel_futures=True) to actually stop
+        # pending work the moment the operator clicks 🛑 Cancel.
+        ex = ThreadPoolExecutor(max_workers=max_workers)
         try:
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {
-                    ex.submit(_safe_worker, worker_fn, item, job_id): item
-                    for item in items
-                }
-                for fut in as_completed(futures):
-                    if is_cancelled(job_id):
-                        for f in futures:
-                            f.cancel()
-                        break
-                    ok, log_msg = fut.result()
-                    completed += 1
-                    _update_progress(
-                        job_id, completed,
-                        current_item=str(log_msg or "")[:200],
-                        success_inc=1 if ok else 0,
-                        error_inc=0 if ok else 1,
-                        log_entry=log_msg,
-                    )
+            futures = {
+                ex.submit(_safe_worker, worker_fn, item, job_id): item
+                for item in items
+            }
+            cancelled_early = False
+            for fut in as_completed(futures):
+                if is_cancelled(job_id):
+                    # Drop pending futures from the queue. Running
+                    # futures can't be killed mid-scrape, but they'll
+                    # short-circuit via _safe_worker's cancel check
+                    # on entry. shutdown(wait=False) returns
+                    # immediately so the runner thread doesn't block.
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    cancelled_early = True
+                    break
+                ok, log_msg = fut.result()
+                completed += 1
+                _update_progress(
+                    job_id, completed,
+                    current_item=str(log_msg or "")[:200],
+                    success_inc=1 if ok else 0,
+                    error_inc=0 if ok else 1,
+                    log_entry=log_msg,
+                )
+            if not cancelled_early:
+                ex.shutdown(wait=True)
             _finish_job(job_id, "cancelled" if is_cancelled(job_id) else "done")
         except Exception as e:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
             _finish_job(job_id, "failed",
                         error_message=f"{type(e).__name__}: {e}\n{traceback.format_exc()[:1000]}")
         finally:
@@ -223,6 +239,12 @@ def start(job_type: str, items: list, worker_fn,
 
 
 def _safe_worker(worker_fn, item, job_id):
+    # Early-exit if the job was cancelled BEFORE this future started
+    # running. Without this check, every queued worker would still
+    # invoke the expensive scrape function even after a cancel —
+    # making the cancel button feel broken from the operator's POV.
+    if is_cancelled(job_id):
+        return True, "(cancelled before start)"
     try:
         result = worker_fn(item, job_id)
         if result is None:

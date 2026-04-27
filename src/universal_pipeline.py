@@ -1930,15 +1930,21 @@ def _probe_smtp_cached(email: str, cache: _Cache) -> dict:
     return result
 
 
-def _nb_verify_cached(email: str, cache: _Cache) -> dict:
-    cached = cache.get("nb_verify", email)
-    if cached is not None:
-        # If the cached entry is from a credit-exhaustion event, don't
-        # trust it — re-query so a topped-up account picks up fresh
-        # results. `credit_exhausted` flag is set below whenever NB
-        # reported 0 credits.
-        if not cached.get("credit_exhausted"):
-            return cached
+def _nb_verify_cached(email: str, cache: _Cache, *,
+                       force_refresh: bool = False) -> dict:
+    """force_refresh=True bypasses the cache — used by the NB-unknown
+    retry path in volume mode where the prior verdict was 'unknown'
+    and we want a fresh NB call (often flips on retry due to transient
+    rate-limit / timeout / server-refused conditions)."""
+    if not force_refresh:
+        cached = cache.get("nb_verify", email)
+        if cached is not None:
+            # If the cached entry is from a credit-exhaustion event, don't
+            # trust it — re-query so a topped-up account picks up fresh
+            # results. `credit_exhausted` flag is set below whenever NB
+            # reported 0 credits.
+            if not cached.get("credit_exhausted"):
+                return cached
 
     # Pre-flight #1: domain must have MX records (free DNS lookup).
     # If it doesn't, the domain can't receive mail at all — skip the

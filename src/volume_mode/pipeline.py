@@ -766,6 +766,30 @@ def scrape_volume(
         dm_name=dm_name, dm_title=dm_title,
         domain=domain, cache=cache,
     )
+
+    # Auto-retry NB once when the winner came back UNKNOWN. NB-unknown
+    # is often transient (rate limit, timeout, momentary server-refused)
+    # and a retry frequently flips it to valid. Costs $0.003 per retry,
+    # only fires when the WINNING candidate is UNKNOWN, so the fan-out
+    # is bounded — at most one extra call per biz where it might
+    # actually flip the outcome.
+    if (winner is not None and winner.nb_result == "unknown"
+            and use_neverbounce and _run_budget_remaining() >= COST_NB_CALL):
+        try:
+            retry = _nb_verify_cached(winner.email, cache, force_refresh=True)
+            new_result = (retry or {}).get("result")
+            if new_result and new_result != "unknown":
+                # Update the candidate in-place so downstream tier
+                # classification + the export adapter see the new
+                # verdict.
+                winner.nb_result = new_result
+                _charge(COST_NB_CALL)
+                biz_cost += COST_NB_CALL
+                result.evidence_trail["nb_unknown_retry"] = {
+                    "email": winner.email, "from": "unknown", "to": new_result,
+                }
+        except Exception as e:
+            logger.debug(f"NB-unknown retry failed: {e}")
     # CMS-aware tier: Squarespace/Webflow catchalls get pushed to REVIEW
     # (they usually don't catchall, so the verdict is suspect); Wix /
     # Shopify / GoDaddy builder catchalls are trusted as real.
