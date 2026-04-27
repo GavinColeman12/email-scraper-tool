@@ -187,6 +187,12 @@ def confidence_tier(winner: Optional[Candidate], *,
         return TIER_EMPTY
     if winner.nb_result == "valid":
         return TIER_VERIFIED
+    # SMTP-probe confirmed mailboxes — NB couldn't verify (often
+    # greylisting on small-biz M365/Workspace domains) but our own
+    # SMTP RCPT TO probe got a 250 OK. Real positive signal; tier as
+    # scraped (volume_scraped) which IS sendable at low bounce risk.
+    if winner.nb_result == "smtp_confirmed":
+        return TIER_SCRAPED
     # NB-unknown specifically — we asked NB, it couldn't say. For cold
     # outreach at scale that's a bounce risk we shouldn't auto-send into.
     if winner.nb_result == "unknown":

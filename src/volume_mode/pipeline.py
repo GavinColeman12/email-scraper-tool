@@ -767,29 +767,77 @@ def scrape_volume(
         domain=domain, cache=cache,
     )
 
-    # Auto-retry NB once when the winner came back UNKNOWN. NB-unknown
-    # is often transient (rate limit, timeout, momentary server-refused)
-    # and a retry frequently flips it to valid. Costs $0.003 per retry,
-    # only fires when the WINNING candidate is UNKNOWN, so the fan-out
-    # is bounded — at most one extra call per biz where it might
-    # actually flip the outcome.
+    # Auto-retry NB on UNKNOWN winners. NB-unknown is usually
+    # transient — rate limit, server timeout, OR (most common on
+    # small-biz domains like medspas / vet clinics) destination-server
+    # GREYLISTING which returns "451 try later". Greylisting typically
+    # clears within 1-30 minutes, so 2 retries at increasing intervals
+    # often flip UNKNOWN → VALID/CATCHALL.
+    #
+    # 2 retries × $0.003 each = $0.006 max per UNKNOWN winner.
+    # On a 200-biz medspa run with 50% unknown that's $0.60 incremental.
     if (winner is not None and winner.nb_result == "unknown"
-            and use_neverbounce and _run_budget_remaining() >= COST_NB_CALL):
-        try:
-            retry = _nb_verify_cached(winner.email, cache, force_refresh=True)
-            new_result = (retry or {}).get("result")
-            if new_result and new_result != "unknown":
-                # Update the candidate in-place so downstream tier
-                # classification + the export adapter see the new
-                # verdict.
-                winner.nb_result = new_result
+            and use_neverbounce):
+        retry_attempts = 0
+        retry_log: list = []
+        for attempt_idx, sleep_before in enumerate([0.5, 5.0]):
+            if _run_budget_remaining() < COST_NB_CALL:
+                retry_log.append(f"attempt-{attempt_idx + 1}-budget-exhausted")
+                break
+            if attempt_idx > 0:
+                # Backoff between retries — gives greylist time to clear.
+                # 5s is empirically enough for most M365/Workspace tarpits.
+                import time as _time_mod
+                _time_mod.sleep(sleep_before)
+            try:
+                retry = _nb_verify_cached(
+                    winner.email, cache, force_refresh=True,
+                )
+                new_result = (retry or {}).get("result")
                 _charge(COST_NB_CALL)
                 biz_cost += COST_NB_CALL
-                result.evidence_trail["nb_unknown_retry"] = {
-                    "email": winner.email, "from": "unknown", "to": new_result,
+                retry_attempts += 1
+                retry_log.append(f"attempt-{attempt_idx + 1}={new_result}")
+                if new_result and new_result != "unknown":
+                    winner.nb_result = new_result
+                    break  # stop early once we have a definitive verdict
+            except Exception as e:
+                retry_log.append(f"attempt-{attempt_idx + 1}-error: {e}")
+                continue
+
+        if retry_attempts:
+            result.evidence_trail["nb_unknown_retry"] = {
+                "email": winner.email,
+                "attempts": retry_attempts,
+                "final": winner.nb_result,
+                "log": retry_log,
+            }
+
+    # SMTP-probe fallback: when NB stays UNKNOWN after retries, run
+    # our own SMTP RCPT TO probe as a last-resort confirming signal.
+    # Free (uses src/email_verifier.verify_smtp). On small-biz domains
+    # the destination server frequently accepts the RCPT TO with 250 OK
+    # even when NB couldn't verify — that's a real positive signal.
+    # Marks the row with "smtp_confirmed" in evidence_trail; ranking
+    # treats it like NB-catchall (volume_scraped tier) which is a
+    # meaningful upgrade from UNKNOWN (volume_review).
+    if (winner is not None and winner.nb_result == "unknown"
+            and use_neverbounce):
+        try:
+            from src.email_verifier import verify_smtp
+            probe = verify_smtp(winner.email, timeout=8)
+            probe_status = (probe or {}).get("status") or ""
+            if probe_status == "valid":
+                # Promote: NB unknown but SMTP confirmed. Treat as
+                # catchall-quality — better than unknown but not
+                # NB-verified. Ranking will tier this volume_scraped.
+                winner.nb_result = "smtp_confirmed"
+                result.evidence_trail["smtp_fallback"] = {
+                    "email": winner.email, "smtp_status": probe_status,
+                    "promoted_from": "unknown",
                 }
         except Exception as e:
-            logger.debug(f"NB-unknown retry failed: {e}")
+            logger.debug(f"SMTP fallback probe failed: {e}")
     # CMS-aware tier: Squarespace/Webflow catchalls get pushed to REVIEW
     # (they usually don't catchall, so the verdict is suspect); Wix /
     # Shopify / GoDaddy builder catchalls are trusted as real.
@@ -977,6 +1025,10 @@ def volume_result_to_scrape_result(result: VolumeResult, business: dict) -> dict
     nb_suffix = ""
     if top_nb == "valid":
         nb_suffix = " — NeverBounce VALID"
+    elif top_nb == "smtp_confirmed":
+        # NB couldn't verify (greylisted) but our own SMTP probe got
+        # a 250 OK on RCPT TO. Real positive signal worth surfacing.
+        nb_suffix = " — SMTP CONFIRMED (NB unknown, SMTP probe accepted)"
     elif top_nb == "catchall":
         nb_suffix = " — NeverBounce CATCH-ALL (unverified)"
     elif top_nb == "invalid":
