@@ -11,6 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import io
+
 import pandas as pd
 import streamlit as st
 
@@ -21,6 +23,65 @@ from src.replay_explain import (
 )
 from src.dashboard_queries import search_metadata
 from scripts.replay_search import run_replay, REPLAY_MODES
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers — classify rows + build export-ready CSV dicts
+# ──────────────────────────────────────────────────────────────────────
+
+def _is_nb_valid(rep: dict) -> bool:
+    """A row counts as 'reachable' if NB confirmed valid on the picked
+    email. Catchall / unknown / invalid all treated as not-yet-reachable."""
+    return ((rep.get("best_email_nb_result") or "").lower() == "valid"
+            and bool(rep.get("best_email")))
+
+
+def _outcome(before: dict, after: dict) -> str:
+    """Bucket every row into the 4 operator-meaningful outcomes:
+      newly_caught — empty / non-valid in A → NB-valid in B  (the WIN)
+      stable_good  — NB-valid in both runs (same OR different email)
+      regressed    — NB-valid in A → not-valid in B
+      still_empty  — neither run produced an NB-valid email
+    """
+    a_good = _is_nb_valid(before)
+    b_good = _is_nb_valid(after)
+    if not a_good and b_good:
+        return "newly_caught"
+    if a_good and b_good:
+        return "stable_good"
+    if a_good and not b_good:
+        return "regressed"
+    return "still_empty"
+
+
+def _export_row(biz_id, before: dict, after: dict, biz_lookup: dict) -> dict:
+    """Flatten a before+after pair into a CSV-friendly dict the user
+    can drop into their outreach tool. Pulls original biz address /
+    phone / website from storage so the export is self-contained."""
+    biz = biz_lookup.get(biz_id) or {}
+    dm = (after.get("decision_maker") or {}) if after.get("decision_maker") else {}
+    return {
+        "Business": after.get("business_name") or biz.get("business_name") or "",
+        "Address": biz.get("address") or "",
+        "Phone": biz.get("phone") or "",
+        "Website": biz.get("website") or after.get("website") or "",
+        "Email (new run)": after.get("best_email") or "",
+        "Email (old run)": before.get("best_email") or "",
+        "NB result": (after.get("best_email_nb_result") or "").lower() or "—",
+        "DM name": dm.get("full_name") or "",
+        "DM title": dm.get("title") or "",
+        "Tier (old)": (before.get("confidence_tier") or "").replace("volume_", ""),
+        "Tier (new)": (after.get("confidence_tier") or "").replace("volume_", ""),
+        "Business ID": biz_id,
+    }
+
+
+def _csv_bytes(rows: list[dict]) -> bytes:
+    if not rows:
+        return b""
+    buf = io.StringIO()
+    pd.DataFrame(rows).to_csv(buf, index=False)
+    return buf.getvalue().encode("utf-8")
 
 
 # Short human descriptions for each mode (used in the selector help text).
@@ -342,12 +403,26 @@ with tab_compare:
     bm_biz = {r["replay"].get("business_id"): r
               for r in (b.get("businesses") or [])}
 
-    # Four categories of change
-    gains = []       # newly_found (empty → something)
-    losses = []      # newly_lost  (something → empty)
-    flips = []       # email_changed
-    tier_ups = []    # same email, tier improved
-    tier_downs = []  # same email, tier regressed
+    # Pull the original biz rows once so exports include
+    # address / phone / website without N+1 lookups.
+    biz_lookup: dict = {}
+    if a_search:
+        for biz in storage.list_businesses(search_id=int(a_search)):
+            biz_lookup[biz["id"]] = biz
+
+    # Bucket every row by NB-valid outcome (the operator-meaningful split)
+    newly_caught: list = []   # was non-valid in A, NB-valid in B  (THE WIN)
+    stable_good: list = []    # NB-valid in both runs
+    regressed: list = []      # NB-valid in A, lost it in B
+    still_empty: list = []    # neither run produced NB-valid
+
+    # Also keep the old fine-grained categories for the per-row tables —
+    # they expose the "why" of each change beyond the simple outcome
+    gains_finegrained = []     # email changed empty → anything
+    flips = []                 # email changed something → something
+    tier_ups = []
+    tier_downs = []
+    losses_finegrained = []
 
     for biz_id, bb in bm_biz.items():
         aa = am_biz.get(biz_id)
@@ -355,52 +430,180 @@ with tab_compare:
             continue
         before_rep = aa.get("replay") or {}
         after_rep = bb.get("replay") or {}
+        outcome = _outcome(before_rep, after_rep)
+        export_row = _export_row(biz_id, before_rep, after_rep, biz_lookup)
+
+        if outcome == "newly_caught":
+            newly_caught.append(export_row)
+        elif outcome == "stable_good":
+            stable_good.append(export_row)
+        elif outcome == "regressed":
+            regressed.append(export_row)
+        else:
+            still_empty.append(export_row)
+
+        # Fine-grained category for the per-row tables
         chg = explain_change(before_rep, after_rep)
-        row = {
-            "Business": (after_rep.get("business_name") or "")[:40],
-            "Before": before_rep.get("best_email") or "—",
-            "After": after_rep.get("best_email") or "—",
-            "Tier before": (before_rep.get("confidence_tier") or "").replace("volume_", ""),
-            "Tier after": (after_rep.get("confidence_tier") or "").replace("volume_", ""),
+        why_row = {
+            **export_row,
             "Why": chg.reason,
         }
         if chg.change_type == "newly_found":
-            gains.append(row)
+            gains_finegrained.append(why_row)
         elif chg.change_type == "newly_lost":
-            losses.append(row)
+            losses_finegrained.append(why_row)
         elif chg.change_type == "email_changed":
-            flips.append(row)
+            flips.append(why_row)
         elif chg.change_type == "tier_changed":
-            if chg.severity == "gain":
-                tier_ups.append(row)
-            else:
-                tier_downs.append(row)
+            (tier_ups if chg.severity == "gain" else tier_downs).append(why_row)
 
-    def _render(title: str, rows: list, emoji: str, caption: str):
+    # ── TOP-LEVEL OUTCOME PANEL — clear right-vs-wrong picture ──
+    st.subheader("Right vs. wrong — outcome breakdown")
+    o1, o2, o3, o4 = st.columns(4)
+    o1.metric(
+        "🟢 Newly caught",
+        len(newly_caught),
+        help="Rows where the OLD run failed (empty / non-NB-valid) but "
+             "the NEW run produced a confirmed-deliverable email. These "
+             "are the wins from your latest pipeline improvements.",
+    )
+    o2.metric(
+        "⚪ Stable correct",
+        len(stable_good),
+        help="Rows where BOTH runs produced an NB-valid email — the "
+             "pipeline got it right both times. Same email or different, "
+             "either way deliverable.",
+    )
+    o3.metric(
+        "🔴 Regressed",
+        len(regressed),
+        delta_color="inverse",
+        help="Rows where the OLD run had a confirmed-deliverable email "
+             "but the NEW run lost it. Watch this carefully — it means "
+             "a recent change broke something that used to work.",
+    )
+    o4.metric(
+        "⚫ Still unreachable",
+        len(still_empty),
+        help="Neither run could find a deliverable email. These are "
+             "genuinely hard targets — defunct businesses, locked-down "
+             "domains, or DMs with no online footprint.",
+    )
+
+    total = len(newly_caught) + len(stable_good) + len(regressed) + len(still_empty)
+    if total:
+        improved_pct = round(100 * len(newly_caught) / total, 1)
+        st.caption(
+            f"**{improved_pct}% improvement rate** — the new run picked "
+            f"up {len(newly_caught)} of {total} rows the old run missed. "
+            f"Net change: **{len(newly_caught) - len(regressed):+d}** "
+            f"deliverable emails."
+        )
+
+    # ── DOWNLOAD WINS — the user's main ask ──
+    st.markdown("### 📥 Download the wins")
+    st.caption(
+        "Export the rows the new run caught that the old one didn't. "
+        "Drop straight into your outreach tool — includes business "
+        "address, phone, website, DM name, and NB-confirmed email."
+    )
+    dl1, dl2, dl3 = st.columns(3)
+    with dl1:
+        st.download_button(
+            f"🟢 Newly caught ({len(newly_caught)})",
+            data=_csv_bytes(newly_caught),
+            file_name=f"replay_newly_caught_A{a_id}_vs_B{b_id}.csv",
+            mime="text/csv",
+            disabled=not newly_caught,
+            type="primary",
+            help="The big win: rows the new pipeline caught that the "
+                 "old one missed. NB-valid only, ready to send.",
+        )
+    with dl2:
+        st.download_button(
+            f"⚪ Stable wins ({len(stable_good)})",
+            data=_csv_bytes(stable_good),
+            file_name=f"replay_stable_good_A{a_id}_vs_B{b_id}.csv",
+            mime="text/csv",
+            disabled=not stable_good,
+            help="Rows both runs got right. Useful to merge into your "
+                 "send list alongside the newly-caught wins.",
+        )
+    with dl3:
+        st.download_button(
+            f"🔴 Regressed ({len(regressed)})",
+            data=_csv_bytes(regressed),
+            file_name=f"replay_regressed_A{a_id}_vs_B{b_id}.csv",
+            mime="text/csv",
+            disabled=not regressed,
+            help="Rows the new run broke. Investigate before promoting "
+                 "the new pipeline to production.",
+        )
+
+    # Combined "all wins" CSV — newly caught + stable
+    if newly_caught or stable_good:
+        all_wins = newly_caught + stable_good
+        st.download_button(
+            f"📦 All deliverable rows ({len(all_wins)}) — combined send list",
+            data=_csv_bytes(all_wins),
+            file_name=f"replay_all_deliverable_A{a_id}_vs_B{b_id}.csv",
+            mime="text/csv",
+            help="Newly caught + stable wins, deduplicated. Your full "
+                 "send-ready list from this comparison.",
+        )
+
+    st.divider()
+
+    # ── PER-CATEGORY TABLES with WHY column + per-table downloads ──
+    st.subheader("Per-row breakdown with reasons")
+    st.caption(
+        "Same data, sliced finer so you can see WHY each row changed. "
+        "Each table downloads as its own CSV."
+    )
+
+    def _render(title: str, rows: list, emoji: str, caption: str,
+                file_slug: str):
         st.markdown(f"### {emoji} {title} ({len(rows)})")
         st.caption(caption)
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                         column_config={
-                             "Why": st.column_config.TextColumn("Why", width="large"),
-                         })
+            # Show a compact subset in the table — full data is in the CSV
+            display_cols = [
+                "Business", "Email (old run)", "Email (new run)",
+                "NB result", "Tier (old)", "Tier (new)", "Why",
+            ]
+            df = pd.DataFrame(rows)
+            display_df = df[[c for c in display_cols if c in df.columns]]
+            st.dataframe(
+                display_df, use_container_width=True, hide_index=True,
+                column_config={
+                    "Why": st.column_config.TextColumn("Why", width="large"),
+                },
+            )
+            st.download_button(
+                f"📥 Download {len(rows)} {title.lower()} as CSV",
+                data=_csv_bytes(rows),
+                file_name=f"replay_{file_slug}_A{a_id}_vs_B{b_id}.csv",
+                mime="text/csv",
+                key=f"dl_{file_slug}_{a_id}_{b_id}",
+            )
         else:
             st.caption("_(none)_")
 
-    _render("Gains — newly found emails", gains, "🟢",
-            "Rows that were empty in A but produced an email in B.")
-    _render("Losses — newly empty", losses, "🔴",
-            "Rows that had an email in A but are now empty. Watch for regressions.")
-    _render("Pick flipped", flips, "🔀",
-            "Different email picked. Reason column explains the ranking shift.")
+    _render("Newly found emails", gains_finegrained, "🟢",
+            "Rows that were empty in A but produced an email in B "
+            "(NB verdict may still be catchall/unknown — check NB column).",
+            "gains")
     _render("Tier upgraded (same email)", tier_ups, "📈",
-            "NB verdict improved — same pick, better confidence.")
+            "Same email picked, NB verdict improved (e.g. unknown → valid).",
+            "tier_ups")
+    _render("Pick flipped", flips, "🔀",
+            "Different email picked. Why column explains the ranking shift.",
+            "flips")
     _render("Tier downgraded (same email)", tier_downs, "📉",
-            "NB verdict worsened — e.g. catchall → unknown, or valid → unknown.")
-
-    st.divider()
-    st.caption(
-        f"**Summary:** {len(gains)} gains, {len(losses)} losses, "
-        f"{len(flips)} flips, {len(tier_ups)} tier-ups, {len(tier_downs)} tier-downs. "
-        f"**Net email change:** {len(gains) - len(losses):+d}."
-    )
+            "Same email, NB verdict worsened. Often transient — re-run "
+            "may recover.",
+            "tier_downs")
+    _render("Newly empty", losses_finegrained, "🔴",
+            "Rows that had an email in A but are now empty. Investigate "
+            "before promoting the new pipeline.",
+            "losses")
