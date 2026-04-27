@@ -489,12 +489,26 @@ def apply_rescue_upgrade(
         # send-safe gate still holds back catchall / unknown / invalid.
         nb_canonical = (new_nb_result or "").lower().strip()
         is_send_safe = nb_canonical in ("valid", "smtp_confirmed")
+        # Re-anchor the email_source display text on rescue. Without
+        # this the legacy text still reads "NeverBounce UNKNOWN" /
+        # "CATCH-ALL" from the original scrape even after the dedicated
+        # neverbounce_result column got upgraded — misleading in CSV
+        # exports + decision logs.
+        verdict_label = {
+            "valid": "NeverBounce VALID (rescued)",
+            "smtp_confirmed": "SMTP CONFIRMED (rescued via fallback)",
+            "catchall": "NeverBounce CATCH-ALL (rescued retry)",
+            "unknown": "NeverBounce UNKNOWN (rescue exhausted)",
+            "invalid": "NeverBounce INVALID (rescued retry)",
+        }.get(nb_canonical, "rescued")
+        new_source = f"rescued via NB retry — {verdict_label}"
         cur.execute(f"""
             UPDATE businesses SET
                 primary_email = {_PARAM},
                 neverbounce_result = {_PARAM},
                 email_safe_to_send = {_PARAM},
                 confidence = {_PARAM},
+                email_source = {_PARAM},
                 scraped_at = {_PARAM}
             WHERE id = {_PARAM}
         """, (
@@ -502,6 +516,7 @@ def apply_rescue_upgrade(
             nb_canonical or None,
             1 if is_send_safe else 0,
             confidence,
+            new_source,
             datetime.utcnow().isoformat(),
             business_id,
         ))
