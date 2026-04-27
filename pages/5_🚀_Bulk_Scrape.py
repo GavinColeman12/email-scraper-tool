@@ -187,19 +187,22 @@ if mode == "triangulation":
         "triangulation only for replay-compatibility with old runs."
     )
 
-# Volume-specific: rescue-empty SearchApi opt-in
+# Volume-specific: rescue-empty SearchApi (default ON — cheap recovery
+# of the ~20% of rows volume's free pipeline can't solve on its own).
 rescue_empties = False
 if mode == "volume":
     rescue_empties = st.checkbox(
-        "🔍 Rescue empties with SearchApi (~$0.010 per empty biz)",
-        value=False,
+        "🔍 Rescue empties with SearchApi (~$0.010 per empty biz) — RECOMMENDED",
+        value=True,
         help="When volume's crawl + Wayback + NPI + LinkedIn all produce "
-             "zero DM candidates for a biz, optionally fire the combined "
-             "owner+press SearchApi to find the founder via press mentions "
-             "/ third-party listings. Only hits the ~20% of rows volume "
+             "zero DM candidates for a biz, fire the combined owner+press "
+             "SearchApi to find the founder via press mentions / "
+             "third-party listings. Only hits the ~20% of rows volume "
              "couldn't solve, so on a 200-biz campaign this adds ~$0.40 "
-             "rather than triangulation's $10+. Recommended ON for "
-             "hard-to-reach verticals (legal / construction / manufacturing).",
+             "rather than triangulation's $10+. Default ON because the "
+             "incremental cost is tiny and recovers founders the free "
+             "pass would otherwise miss. Untick to save the ~$0.40 if "
+             "you're running pure mass-volume on a tight budget.",
     )
 
 if mode == "verified":

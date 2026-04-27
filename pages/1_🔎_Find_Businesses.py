@@ -218,11 +218,14 @@ if results:
             f"🚀 Save + Run full pipeline ({len(selected)} businesses)",
             type="primary",
             disabled=not selected,
-            help="Saves the search AND immediately starts a Volume-mode "
-                 "scrape in the background: deep website crawl + Wayback + "
-                 "NPI (for medical) + selective NeverBounce. Cost: ~$0.009/"
-                 "biz, ~$1.80 per 200. When done, go to 🚀 Bulk Scrape or "
-                 "📥 Export CSV to review the results.",
+            help="Saves the search AND immediately starts a full Volume-"
+                 "mode scrape in the background: deep website crawl + "
+                 "Wayback + NPI (for medical) + selective NeverBounce + "
+                 "🔍 SearchApi rescue on empty rows. Cost: ~$0.011/biz "
+                 "(~$2.20 per 200). Rescue recovers founders that the "
+                 "free pipeline couldn't find. When done, head to "
+                 "🚀 Bulk Scrape (run review-rescue) → 📥 Export CSV "
+                 "(send-safe split).",
         )
 
     if save_only or save_and_run:
@@ -258,7 +261,17 @@ if results:
 
                 def _worker(biz, job_id):
                     try:
-                        vres = scrape_volume(biz, use_neverbounce=True)
+                        # rescue_empties ON by default in the one-click
+                        # flow — matches Bulk Scrape's default. Only
+                        # spends ~$0.010 per row that the free pipeline
+                        # couldn't solve (~20% of the batch), so a
+                        # 200-biz campaign adds ~$0.40 to recover
+                        # founders the free pass would miss.
+                        vres = scrape_volume(
+                            biz,
+                            use_neverbounce=True,
+                            rescue_empties_with_searchapi=True,
+                        )
                         result = volume_result_to_scrape_result(vres, biz)
                         storage.update_business_emails(biz["id"], result)
                         # Rescore using the updated row
@@ -287,10 +300,12 @@ if results:
                 st.success(
                     f"🚀 Created search #{search_id} ({count} businesses). "
                     f"Volume-mode pipeline running in background "
-                    f"(job `{job_id[:8]}`). Est. cost "
-                    f"~${count * 0.009:.2f}. "
-                    f"Head to **🚀 Bulk Scrape** to watch progress / run "
-                    f"rescue passes, or **📥 Export CSV** when done."
+                    f"(job `{job_id[:8]}`) with 🔍 SearchApi rescue ON. "
+                    f"Est. cost ~${count * 0.011:.2f} "
+                    f"(~$0.009 base + ~$0.002 rescue avg). "
+                    f"Head to **🚀 Bulk Scrape** to watch progress + run "
+                    f"the review-rescue pass, then **📥 Export CSV** for "
+                    f"the send-safe split."
                 )
             except Exception as e:
                 st.error(f"Search saved but pipeline failed to start: {e}")
