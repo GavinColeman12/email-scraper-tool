@@ -482,6 +482,13 @@ def apply_rescue_upgrade(
     conn = _connect()
     try:
         cur = _cursor(conn)
+        # email_safe_to_send: 1 for NB=valid, also for smtp_confirmed
+        # (NB couldn't verify due to greylisting, but our own SMTP
+        # RCPT TO probe got 250 OK — real positive signal worth
+        # surfacing as send-eligible). Anything else stays 0 so the
+        # send-safe gate still holds back catchall / unknown / invalid.
+        nb_canonical = (new_nb_result or "").lower().strip()
+        is_send_safe = nb_canonical in ("valid", "smtp_confirmed")
         cur.execute(f"""
             UPDATE businesses SET
                 primary_email = {_PARAM},
@@ -492,8 +499,8 @@ def apply_rescue_upgrade(
             WHERE id = {_PARAM}
         """, (
             new_email,
-            (new_nb_result or "").lower().strip() or None,
-            1 if (new_nb_result or "").lower().strip() == "valid" else 0,
+            nb_canonical or None,
+            1 if is_send_safe else 0,
             confidence,
             datetime.utcnow().isoformat(),
             business_id,

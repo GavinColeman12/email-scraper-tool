@@ -220,9 +220,12 @@ def is_safe_to_send(
     if not email or "@" not in email:
         return False, ["no email"]
 
-    # 1. NB verdict must be "valid"
+    # 1. NB verdict must be "valid" — OR smtp_confirmed, which means
+    # NB couldn't verify (greylisted) but our own SMTP RCPT TO probe
+    # got 250 OK. Real positive signal; treat as send-safe at slightly
+    # higher bounce risk than NB-valid (~1-2% vs <0.5%).
     nb_result = (biz.get("neverbounce_result") or "").lower().strip()
-    if nb_result != "valid":
+    if nb_result not in ("valid", "smtp_confirmed"):
         if nb_result in ("catchall", "catch-all"):
             reasons.append("NB catchall — mailbox existence unconfirmed")
         elif nb_result == "unknown":

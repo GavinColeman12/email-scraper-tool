@@ -228,26 +228,51 @@ def rescue_review_row(
     calls_made = 0
     attempts: list[dict] = []
 
-    # ── STRATEGY 1: NB unknown → re-verify the current email ────────
-    # Transient NB errors (rate limit, timeout) often clear on retry.
-    if nb_result == "unknown" and email:
+    # ── STRATEGY 1: NB retry on unknown / catchall winners ──────────
+    # Transient NB errors (rate limit, timeout, greylisting) often
+    # clear on retry. Also retry catchall — sometimes the second NB
+    # call distinguishes a true catchall from an "unknown that NB
+    # called catchall to be safe."
+    if nb_result in ("unknown", "catchall") and email:
         try:
             r = nb_verify_fn(email)
             cost += COST_NB_CALL
             calls_made += 1
             attempts.append({"email": email, "nb_result": r.get("result"),
-                              "via": "retry_unknown"})
+                              "via": f"retry_{nb_result}"})
             new_result = (r.get("result") or "").lower()
             if new_result == "valid":
                 return RescueResult(
                     status="upgraded",
                     new_email=email,
                     new_nb_result="valid",
-                    reason="NB re-verify returned valid (was unknown)",
+                    reason=f"NB re-verify returned valid (was {nb_result})",
                     attempts=attempts, cost_usd=cost,
                 )
-            # If it's still unknown, fall through to strategy 2
-            # (we might still find a better email via DM patterns).
+            # NB-unknown → SMTP fallback. If our own SMTP RCPT TO probe
+            # accepts the address, that's real positive signal even
+            # when NB couldn't verify (typical on small-biz greylisted
+            # M365 / Workspace domains). Free — no NB credit cost.
+            if new_result in ("unknown", "") or nb_result == "unknown":
+                try:
+                    from src.email_verifier import verify_smtp
+                    probe = verify_smtp(email, timeout=8)
+                    smtp_status = (probe or {}).get("status") or ""
+                    attempts.append({
+                        "email": email, "smtp_status": smtp_status,
+                        "via": "smtp_fallback",
+                    })
+                    if smtp_status == "valid":
+                        return RescueResult(
+                            status="upgraded",
+                            new_email=email,
+                            new_nb_result="smtp_confirmed",
+                            reason="NB unknown but SMTP RCPT TO got 250 OK",
+                            attempts=attempts, cost_usd=cost,
+                        )
+                except Exception as e:
+                    attempts.append({"email": email,
+                                      "smtp_error": str(e)})
         except Exception as e:
             attempts.append({"email": email, "error": str(e)})
 
@@ -299,6 +324,11 @@ def rescue_review_row(
         new_patterns = [(n, e) for n, e in new_patterns
                          if e.lower() not in already_tried]
 
+        # Track best smtp_confirmed fallback in case NO pattern returns
+        # NB-valid — we'll still upgrade with SMTP confirmation, which
+        # is way better than leaving the row in review.
+        smtp_confirmed_fallback: Optional[tuple[str, str]] = None
+
         for pattern_name, candidate in new_patterns:
             if calls_made >= max_calls:
                 # Hit the per-row cap — stop and mark exhausted
@@ -318,9 +348,40 @@ def rescue_review_row(
                         reason=f"rescued via pattern {pattern_name!r}",
                         attempts=attempts, cost_usd=cost,
                     )
+                # NB unknown on this candidate → try SMTP probe as
+                # confirming signal. Free. Save the first candidate
+                # SMTP confirms — we'll fall back to it if no pattern
+                # returns NB-valid.
+                if res == "unknown" and not smtp_confirmed_fallback:
+                    try:
+                        from src.email_verifier import verify_smtp
+                        probe = verify_smtp(candidate, timeout=6)
+                        smtp_status = (probe or {}).get("status") or ""
+                        attempts.append({
+                            "email": candidate, "pattern": pattern_name,
+                            "smtp_status": smtp_status,
+                            "via": "smtp_pattern_fallback",
+                        })
+                        if smtp_status == "valid":
+                            smtp_confirmed_fallback = (candidate, pattern_name)
+                    except Exception:
+                        pass
             except Exception as e:
                 attempts.append({"email": candidate, "error": str(e)})
                 continue
+
+        # Pattern loop done with no NB-valid hit. If SMTP confirmed any
+        # pattern, upgrade to that — better than leaving in review.
+        if smtp_confirmed_fallback:
+            cand, pat = smtp_confirmed_fallback
+            return RescueResult(
+                status="upgraded",
+                new_email=cand,
+                new_nb_result="smtp_confirmed",
+                reason=f"NB unknown on all patterns; SMTP confirmed "
+                       f"{pat!r}",
+                attempts=attempts, cost_usd=cost,
+            )
 
     # No upgrade possible — all remaining patterns invalid/unknown
     return RescueResult(
