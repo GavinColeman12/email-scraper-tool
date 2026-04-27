@@ -3,6 +3,8 @@ Paginated Google Maps business search via SearchApi.io.
 Returns up to `max_results` businesses with name, address, website, phone, place_id.
 """
 import time
+from typing import Optional
+
 import requests
 
 from src.secrets import get_secret
@@ -228,8 +230,34 @@ def _normalize_query(q: str) -> str:
     return q
 
 
+def fuzzy_synonym_key(query: str) -> Optional[str]:
+    """
+    When the user's query doesn't exactly match any synonym key, find
+    the closest one via edit distance. Catches typos like 'restaraunt'
+    → 'restaurant', 'dentsit' → 'dentist'. Returns None if no key is
+    close enough (cutoff 0.78 — strict to avoid wrong corrections).
+
+    Standard library only (difflib) — no extra deps.
+    """
+    if not query:
+        return None
+    import difflib
+    q = query.strip().lower()
+    if q in QUERY_SYNONYMS:
+        return None  # exact match already covered upstream
+    matches = difflib.get_close_matches(
+        q, QUERY_SYNONYMS.keys(), n=1, cutoff=0.78,
+    )
+    return matches[0] if matches else None
+
+
 def _query_variants(query: str) -> list:
-    """Return ordered list of queries to try, starting with the user's input."""
+    """Return ordered list of queries to try, starting with the user's input.
+
+    If the user's query is a typo (e.g. 'restaraunt') we ALSO fan out
+    on the corrected form ('restaurant') and its synonyms, so they
+    don't get stuck on Google Maps' ~30-result single-query cap.
+    """
     q = _normalize_query(query)
     variants = [query]  # always try the exact user query first
 
@@ -237,6 +265,16 @@ def _query_variants(query: str) -> list:
     synonyms = list(QUERY_SYNONYMS.get(q, []))
     if q.endswith("s") and q[:-1] in QUERY_SYNONYMS:
         synonyms.extend(QUERY_SYNONYMS[q[:-1]])
+
+    # Typo correction — if normalized query has zero exact synonyms,
+    # try fuzzy-matching to a known synonym key. Add the corrected
+    # term + its synonyms to the variant list. Original query still
+    # leads (Google Maps may match on the typo too).
+    if not synonyms:
+        corrected = fuzzy_synonym_key(q)
+        if corrected:
+            variants.append(corrected)
+            synonyms.extend(QUERY_SYNONYMS.get(corrected, []))
 
     variants.extend(synonyms)
 

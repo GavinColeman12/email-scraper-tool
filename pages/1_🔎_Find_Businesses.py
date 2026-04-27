@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from src import storage
-from src.maps_search import search_businesses, estimate_cost, SearchError
+from src.maps_search import search_businesses, estimate_cost, SearchError, QUERY_SYNONYMS
 
 st.set_page_config(page_title="Find Businesses", page_icon="🔎", layout="wide")
 st.title("🔎 Find Businesses on Google Maps")
@@ -38,6 +38,18 @@ with st.form("search_form"):
     )
 
     est = estimate_cost(max_results, query=query)
+    # If the query doesn't have any registered synonyms, try fuzzy
+    # matching to a known key (catches typos like "restaraunt" →
+    # "restaurant"). Show the suggestion inline so the operator
+    # knows the synonym fan-out applies if they accept the fix.
+    suggested_correction = None
+    if query and est["variants"] <= 1:
+        try:
+            from src.maps_search import fuzzy_synonym_key
+            suggested_correction = fuzzy_synonym_key(query)
+        except Exception:
+            suggested_correction = None
+
     if est["variants"] > 1:
         st.caption(
             f"💰 **Estimated cost:** ~${est['avg_usd']:.2f} typical, "
@@ -45,6 +57,17 @@ with st.form("search_form"):
             f"(~{est['avg_calls']}-{est['max_calls']} API calls · "
             f"{est['variants']} query variants will fan out: the scraper tries "
             f"'{query}', then synonyms until it hits {max_results} unique results)"
+        )
+    elif suggested_correction:
+        # Even with the typo, _query_variants will auto-correct + fan
+        # out — surface that to the user so they understand why the
+        # cost just went up and what got expanded.
+        st.caption(
+            f"💰 **Estimated cost:** ~${est['avg_usd']:.2f} — "
+            f"⚠️ '{query}' looks like a typo for '**{suggested_correction}**'. "
+            f"Auto-correcting on submit + fanning out to "
+            f"{len(QUERY_SYNONYMS.get(suggested_correction, [])) + 1} synonyms "
+            f"(no need to re-type)."
         )
     else:
         st.caption(
