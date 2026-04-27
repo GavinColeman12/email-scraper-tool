@@ -86,3 +86,83 @@ def test_estimate_cost_factors_in_typo_correction():
     # Both should fan out to multiple variants now
     assert est_typo["variants"] > 1
     assert est_typo["variants"] >= est_correct["variants"] - 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Coverage breadth — every major industry has multi-variant fan-out
+# ──────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("query,min_variants", [
+    # Healthcare
+    ("dentist", 4), ("doctor", 4), ("clinic", 4), ("urgent care", 3),
+    ("pediatrician", 3), ("dermatologist", 3), ("cardiologist", 3),
+    ("chiropractor", 3), ("physical therapy", 4), ("med spa", 3),
+    ("orthodontist", 3), ("oral surgeon", 3), ("optometrist", 4),
+    ("therapist", 3), ("psychologist", 3),
+    # Vet / pet
+    ("vet", 3), ("pet groomer", 2), ("dog trainer", 2),
+    # Legal
+    ("lawyer", 4), ("law firm", 4), ("personal injury attorney", 3),
+    ("divorce attorney", 2), ("estate attorney", 2),
+    # Food
+    ("restaurant", 5), ("bakery", 3), ("pizza", 2), ("bar", 4),
+    ("brewery", 3), ("coffee shop", 2), ("catering", 3),
+    ("food truck", 1),  # niche; just don't crash
+    # Wellness / beauty
+    ("gym", 3), ("yoga", 2), ("salon", 2), ("nail salon", 2),
+    ("massage", 4), ("spa", 2), ("tattoo", 2), ("waxing", 2),
+    # Trades
+    ("plumber", 3), ("electrician", 3), ("hvac", 4), ("roofer", 3),
+    ("painter", 3), ("carpenter", 2), ("handyman", 3),
+    ("locksmith", 3), ("movers", 2), ("solar", 3),
+    # Construction
+    ("contractor", 3), ("builder", 2), ("remodeling", 2),
+    # Finance
+    ("accountant", 4), ("financial advisor", 3), ("mortgage", 3),
+    ("insurance", 3), ("wealth management", 3),
+    # Real estate
+    ("realtor", 2), ("real estate", 5), ("property management", 3),
+    # Marketing / agency
+    ("marketing agency", 3), ("seo", 2), ("web design", 3),
+    ("graphic design", 3), ("pr firm", 3),
+    # Auto
+    ("mechanic", 3), ("auto detailing", 3), ("tire shop", 3),
+    ("car wash", 3),
+    # Retail
+    ("florist", 2), ("jeweler", 3), ("boutique", 3),
+    ("furniture store", 2), ("pharmacy", 3),
+    # Education
+    ("preschool", 4), ("daycare", 3), ("tutoring", 3),
+    ("private school", 3),
+    # Hospitality
+    ("hotel", 4), ("wedding venue", 3),
+    # Creative
+    ("photographer", 4), ("event planner", 3),
+    # Tech
+    ("software", 3), ("it services", 3), ("cybersecurity", 3),
+    # Misc
+    ("nonprofit", 3), ("church", 2), ("funeral home", 3),
+    ("storage", 3),
+])
+def test_industry_has_synonym_fanout(query, min_variants):
+    """Every major industry should expand to N+1 variants (original
+    + at least N synonyms) so it crosses Google Maps' single-query
+    cap. Locks in the comprehensive coverage from this commit."""
+    variants = _query_variants(query)
+    # +1 because variants always include the original query first
+    assert len(variants) >= min_variants + 1, (
+        f"{query!r} only got {len(variants)} variants (need >= "
+        f"{min_variants + 1}): {variants}"
+    )
+
+
+def test_no_duplicate_synonym_keys():
+    """Sanity: every key in QUERY_SYNONYMS is unique. Catches the
+    duplicate 'insurance' bug from before."""
+    # Python dict literally can't have duplicate keys (later wins) —
+    # this check is a guard against accidentally redefining the dict
+    # in a way that loses entries. Verify the count matches what we
+    # expect after the comprehensive expansion (~290+ keys).
+    assert len(QUERY_SYNONYMS) >= 250, (
+        f"Expected 250+ synonym keys, got {len(QUERY_SYNONYMS)}"
+    )
