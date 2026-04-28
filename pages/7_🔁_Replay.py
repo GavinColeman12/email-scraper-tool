@@ -337,6 +337,11 @@ with tab_new:
         with nc2:
             jc1, jc2 = st.columns(2)
             if jc1.button("🔍 Inspect", use_container_width=True):
+                # Clear the stale session_state so the URL param re-seeds
+                # the dropdown on the next render. Without this, the
+                # Inspect tab would keep showing whatever the user last
+                # picked there directly (since session_state survives).
+                st.session_state.pop("_inspect_pick", None)
                 st.query_params["tab"] = "inspect"
                 st.query_params["inspect_id"] = str(jump_id)
                 st.rerun()
@@ -358,6 +363,10 @@ with tab_new:
                     same, key=lambda r: r.get("created_at") or "",
                     reverse=True,
                 )[0]
+                # Clear stale session_state so the URL params re-seed
+                # the Compare dropdowns on next render.
+                st.session_state.pop("_cmp_a", None)
+                st.session_state.pop("_cmp_b", None)
                 st.query_params["tab"] = "compare"
                 st.query_params["cmp_a"] = str(partner["id"])
                 st.query_params["cmp_b"] = str(jump_id)
@@ -383,15 +392,21 @@ with tab_inspect:
     rep_labels = {r["id"]: _fmt_rep(r) for r in replays}
 
     # Persist selection across navigation via query_params + session_state.
-    # Priority: ?inspect_id=N URL param > prior session state > newest replay.
-    qp_inspect = qp.get("inspect_id")
-    if qp_inspect:
-        try:
-            qp_id = int(qp_inspect)
-            if qp_id in rep_labels:
-                st.session_state["_inspect_pick"] = qp_id
-        except Exception:
-            pass
+    # Priority: prior session state > ?inspect_id URL param > newest.
+    #
+    # Only seed session_state from URL on FIRST load. Otherwise, every
+    # rerun would clobber the user's dropdown pick with the stale URL
+    # value (URL lags one render behind the actual selection), making
+    # the dropdown appear to revert to whatever was first loaded.
+    if "_inspect_pick" not in st.session_state:
+        qp_inspect = qp.get("inspect_id")
+        if qp_inspect:
+            try:
+                qp_id = int(qp_inspect)
+                if qp_id in rep_labels:
+                    st.session_state["_inspect_pick"] = qp_id
+            except Exception:
+                pass
 
     inspect_id = st.selectbox(
         "Pick a replay to inspect",
@@ -400,8 +415,11 @@ with tab_inspect:
         key="_inspect_pick",
         help="Selection persists if you navigate to another page and come back.",
     )
-    # Mirror selection into URL so refreshes / back-button preserve it
-    st.query_params["inspect_id"] = str(inspect_id)
+    # Mirror selection into URL so refreshes / back-button / cross-page
+    # navigation preserve it. Only writes when changed to avoid extra
+    # reruns on no-op updates.
+    if qp.get("inspect_id") != str(inspect_id):
+        st.query_params["inspect_id"] = str(inspect_id)
 
     full = get_replay(int(inspect_id))
     if not full:
@@ -728,7 +746,10 @@ with tab_inspect:
             )
         with c2:
             if st.button("🔁 Open in Compare tab", type="primary"):
-                # Set query params for both A and B and reload
+                # Clear stale session_state so the URL params re-seed
+                # both Compare dropdowns on next render.
+                st.session_state.pop("_cmp_a", None)
+                st.session_state.pop("_cmp_b", None)
                 st.query_params["tab"] = "compare"
                 st.query_params["cmp_a"] = str(other_id)
                 st.query_params["cmp_b"] = str(rid)
@@ -758,23 +779,28 @@ with tab_compare:
     rep_labels = {r["id"]: _fmt_rep_c(r) for r in replays}
 
     # Honor deep-link from Inspect tab's "Open in Compare" button —
-    # cmp_a / cmp_b query params override the default selection.
-    qp_a = qp.get("cmp_a")
-    qp_b = qp.get("cmp_b")
-    if qp_a:
-        try:
-            qa = int(qp_a)
-            if qa in rep_labels:
-                st.session_state["_cmp_a"] = qa
-        except Exception:
-            pass
-    if qp_b:
-        try:
-            qb = int(qp_b)
-            if qb in rep_labels:
-                st.session_state["_cmp_b"] = qb
-        except Exception:
-            pass
+    # cmp_a / cmp_b query params seed the dropdowns ON FIRST LOAD only.
+    # Same bug as Inspect tab pre-fix: overwriting session_state from
+    # URL on every rerun would clobber the user's dropdown pick (URL
+    # lags one render behind their selection).
+    if "_cmp_a" not in st.session_state:
+        qp_a = qp.get("cmp_a")
+        if qp_a:
+            try:
+                qa = int(qp_a)
+                if qa in rep_labels:
+                    st.session_state["_cmp_a"] = qa
+            except Exception:
+                pass
+    if "_cmp_b" not in st.session_state:
+        qp_b = qp.get("cmp_b")
+        if qp_b:
+            try:
+                qb = int(qp_b)
+                if qb in rep_labels:
+                    st.session_state["_cmp_b"] = qb
+            except Exception:
+                pass
 
     cc1, cc2 = st.columns(2)
     a_id = cc1.selectbox("Before (A)", options=list(rep_labels.keys()),
@@ -784,9 +810,11 @@ with tab_compare:
     b_id = cc2.selectbox("After (B)",  options=list(rep_labels.keys()),
                          format_func=lambda k: rep_labels[k],
                          index=0, key="_cmp_b")
-    # Mirror back into URL for stable navigation
-    st.query_params["cmp_a"] = str(a_id)
-    st.query_params["cmp_b"] = str(b_id)
+    # Mirror back into URL for stable navigation, only when changed
+    if qp.get("cmp_a") != str(a_id):
+        st.query_params["cmp_a"] = str(a_id)
+    if qp.get("cmp_b") != str(b_id):
+        st.query_params["cmp_b"] = str(b_id)
     if a_id == b_id:
         st.warning("Pick two different replays."); st.stop()
 
