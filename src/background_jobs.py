@@ -19,6 +19,52 @@ from src.storage import USE_PG, _PARAM, _connect, _cursor, _row_to_dict
 _CANCEL_FLAGS: dict = {}
 _LOCK = threading.Lock()
 
+# Per-job set of items currently being processed by workers. Live
+# updates from _safe_worker on entry/exit so the sidebar widget can
+# show "Now scraping: A, B, C". Process-local — sufficient because
+# background_jobs are themselves process-local (daemon threads tied
+# to the running Streamlit process).
+_ACTIVE_ITEMS: dict = {}            # {job_id: set[str]}
+_ACTIVE_ITEMS_LOCK = threading.Lock()
+
+
+def _item_label(item) -> str:
+    """Best-effort human-readable label for a worker item. Most
+    background jobs operate on biz dicts with a 'business_name' key."""
+    if isinstance(item, dict):
+        return str(item.get("business_name") or item.get("name") or item.get("id") or "")[:60]
+    return str(item)[:60]
+
+
+def _track_item_start(job_id: str, item) -> str:
+    """Record an item as actively being processed. Returns the label
+    so the worker can pass it to _track_item_done at exit."""
+    label = _item_label(item)
+    if not label:
+        return ""
+    with _ACTIVE_ITEMS_LOCK:
+        _ACTIVE_ITEMS.setdefault(job_id, set()).add(label)
+    return label
+
+
+def _track_item_done(job_id: str, label: str) -> None:
+    if not label:
+        return
+    with _ACTIVE_ITEMS_LOCK:
+        s = _ACTIVE_ITEMS.get(job_id)
+        if s is not None:
+            s.discard(label)
+            if not s:
+                _ACTIVE_ITEMS.pop(job_id, None)
+
+
+def get_active_items(job_id: str) -> list:
+    """Public API — return the labels of items currently being
+    processed for this job. Used by the sidebar widget."""
+    with _ACTIVE_ITEMS_LOCK:
+        s = _ACTIVE_ITEMS.get(job_id)
+        return sorted(s) if s else []
+
 
 SCHEMA_PG = """
 CREATE TABLE IF NOT EXISTS background_jobs (
@@ -268,6 +314,7 @@ def _safe_worker(worker_fn, item, job_id):
     # making the cancel button feel broken from the operator's POV.
     if is_cancelled(job_id):
         return True, "(cancelled before start)"
+    label = _track_item_start(job_id, item)
     try:
         result = worker_fn(item, job_id)
         if result is None:
@@ -279,6 +326,8 @@ def _safe_worker(worker_fn, item, job_id):
         return True, str(result)
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+    finally:
+        _track_item_done(job_id, label)
 
 
 def get(job_id: str) -> dict:

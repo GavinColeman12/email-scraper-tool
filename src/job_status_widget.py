@@ -61,6 +61,28 @@ def _job_card(job: dict) -> None:
         m1, m2 = st.columns(2)
         m1.caption(f"✓ {success}")
         m2.caption(f"✗ {errors}" if errors else "")
+
+        # ▶ Now processing — shows the items currently in-flight so
+        # the operator can see WHICH biz is taking forever when one
+        # worker gets stuck on a long crawl. Process-local set tracked
+        # by _safe_worker on entry/exit.
+        try:
+            active_items = background_jobs.get_active_items(job["id"])
+        except Exception:
+            active_items = []
+        if active_items:
+            head = ", ".join(active_items[:3])
+            tail = f" (+{len(active_items) - 3} more)" if len(active_items) > 3 else ""
+            st.caption(f"▶ **Now scraping:** {head}{tail}")
+
+        # Last completed item — useful when no workers are currently
+        # in-flight (e.g. between batches or right at the end).
+        # current_item is what _update_progress wrote after the most
+        # recent worker completion.
+        last_item = (job.get("current_item") or "").strip()
+        if last_item and not active_items:
+            st.caption(f"_Last: {last_item[:80]}_")
+
         # Cancel button — quick way to stop a runaway job from
         # any page without navigating to Bulk Scrape
         if st.button(
