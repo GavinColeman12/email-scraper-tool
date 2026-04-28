@@ -151,10 +151,12 @@ credits (Phase 1-3 caches live 14-90 days).
   regressed, ⚫ still empty. Download the wins as CSV (the rows the
   new run caught that the old missed).
 
-**Cost:** ~$0 per replay. Paid retries (NB-unknown auto-retry,
-SearchApi rescue-empties, LinkedIn fallback) are suppressed in
-replay mode — cached results from prior live scrapes are reused
-instead. Safe to run as many as you want.
+**Cost:** typically ~$0–$0.012 per biz. Paid retries (NB-unknown
+auto-retry, SearchApi rescue-empties, LinkedIn fallback, SMTP probe)
+are suppressed. Fresh NB calls fire ONLY when a candidate isn't
+already in the NB cache — without this, replays on old searches
+that predate NB tracking would produce no useful diff. Cached
+results stay free.
 """
     )
 
@@ -263,12 +265,19 @@ with tab_new:
         est_seconds = int(biz_total * secs_per_biz)
         est_hours = est_seconds // 3600
         est_min = (est_seconds % 3600) // 60
-        # Replay mode is FREE — paid retries are suppressed (no fresh
-        # NB calls, no SearchApi rescue, no LinkedIn fallback). Cached
-        # NB results are still consulted ($0). The rare exception:
-        # Haiku name-classifier + email-picker calls on uncached
-        # candidate-set hashes (~$0.001/biz worst case).
-        est_cost = biz_total * 0.001  # max ~$0.20 on a 200-biz replay
+        # Replay mode suppresses PAID RETRY paths (NB-unknown auto-
+        # retry, SearchApi rescue-empties, LinkedIn fallback, SMTP
+        # probe) but DOES make fresh NB calls on candidates that
+        # aren't in the NB cache yet — without that, replays on
+        # old searches with no NB history would produce no diff
+        # (everything looks "still empty"). Cost depends entirely
+        # on cache hit rate:
+        #   Recent searches (NB cache full):    ~$0.001/biz
+        #   Old searches (NB cache empty):      ~$0.012/biz worst case
+        # Use the higher number for the upper bound — operator can
+        # see actual spend in the job summary after run.
+        est_cost_low = biz_total * 0.001
+        est_cost_high = biz_total * 0.012
         time_str = (
             f"~{est_hours}h {est_min}m" if est_hours
             else f"~{est_min}m" if est_min
@@ -277,10 +286,11 @@ with tab_new:
         st.info(
             f"📊 **Plan:** {len(search_ids)} replay(s), "
             f"**{biz_total}** total businesses · est. wall time **{time_str}** "
-            f"· est. cost **~${est_cost:.2f}** (replay mode skips "
-            f"paid retries — cached NB / SearchApi / LinkedIn results "
-            "are reused). Each replay runs as a separate background "
-            "job — watch progress in the sidebar."
+            f"· est. cost **~${est_cost_low:.2f}–${est_cost_high:.2f}** "
+            "(low = cache hits on recent searches, high = fresh NB "
+            "calls on old searches with empty NB cache; paid retries "
+            "and rescue paths are still suppressed). Each replay runs "
+            "as a separate background job — watch progress in the sidebar."
         )
 
     if st.button("🔁 Queue replay(s)", type="primary",

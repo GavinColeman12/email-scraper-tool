@@ -744,15 +744,6 @@ def scrape_volume(
             # Skip if already NB'd (shouldn't happen, defence-in-depth)
             if cand.nb_result is not None:
                 continue
-            # Replay mode: only consult cached NB results, never make
-            # a fresh paid API call. Use _Cache directly to read
-            # without the live-call fallback path.
-            if replay_mode:
-                cached = cache.get("nb_verify", cand.email)
-                if cached is not None and not cached.get("credit_exhausted"):
-                    cand.nb_result = cached.get("result")
-                # else: leave nb_result=None — replay shows "untested"
-                continue
             # CMS skip: on platform-mailbox CMSes (Wix / Weebly / Duda
             # / Shopify / GoDaddy Builder), bucket-D/E guesses will
             # almost always NB as catchall. Save the call — mark as
