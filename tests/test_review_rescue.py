@@ -316,15 +316,20 @@ def test_apply_rescue_upgrade_writes_only_rescue_fields():
     assert mock_cur.execute.called
     sql, params = mock_cur.execute.call_args[0]
 
-    # The SET clause must touch ONLY the five rescue fields.
+    # The SET clause must touch ONLY the rescue fields.
     # Anything in the SET clause that's an evidence field is a bug.
     set_clause = sql.split("SET", 1)[1].split("WHERE", 1)[0].lower()
     allowed = {
         "primary_email", "neverbounce_result", "email_safe_to_send",
         "confidence", "scraped_at",
+        # email_source is rewritten too so the CSV / decision-log
+        # display reflects the rescue (e.g. "rescued via NB retry —
+        # NeverBounce VALID (rescued)") instead of the original scrape's
+        # legacy "UNKNOWN" / "CATCH-ALL" string.
+        "email_source",
     }
     forbidden = {
-        "contact_name", "contact_title", "email_source", "reasoning",
+        "contact_name", "contact_title", "reasoning",
         "synthesizer", "professional_ids", "triangulation_pattern",
         "triangulation_confidence", "triangulation_method",
         "scraped_emails_json", "constructed_emails_json",

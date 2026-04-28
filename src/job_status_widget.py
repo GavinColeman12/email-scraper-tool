@@ -40,6 +40,7 @@ def _job_card(job: dict) -> None:
         "bulk_deep_scrape": "🧠 Deep scrape",
         "bulk_verified_scrape": "✅ Verified scrape",
         "bulk_scrape": "⚡ Basic scrape",
+        "replay": "🔁 Replay",
     }.get(job_type, job_type)
 
     # Search context — pulled from metadata so the sidebar shows what

@@ -294,6 +294,167 @@ def run_replay(search_id: int, label: str, limit: int = None,
     return replay_id
 
 
+# ─────────────────────────────────────────────────────────────────────
+# ASYNC entrypoint — runs replay through background_jobs so it appears
+# in the live sidebar widget instead of blocking the page for 30+ min.
+# ─────────────────────────────────────────────────────────────────────
+
+# In-memory store for in-flight replay state, keyed by job_id. Each
+# worker appends its (original_row, replay_row) tuple. Finalizer
+# aggregates + persists once all workers finish.
+import threading as _threading_replay
+_REPLAY_STATE: dict = {}
+_REPLAY_STATE_LOCK = _threading_replay.Lock()
+
+
+def start_replay_async(search_id: int, label: str, *,
+                        limit: int = None, mode: str = "volume") -> str:
+    """
+    Kick off a replay as a background_jobs job and return the job_id
+    immediately. The Streamlit page can then return control to the
+    user while the replay runs — it appears in the active-jobs
+    sidebar widget like every other long-running task.
+
+    Architecture:
+      - One worker per business; workers write their per-biz result
+        into _REPLAY_STATE[job_id]["rows"] under a thread lock.
+      - Once all workers finish, the finalizer aggregates metrics +
+        calls save_replay() to persist the replay_runs row.
+      - Cancellation is honored via background_jobs.is_cancelled().
+
+    Returns the job_id (a string), NOT the replay_id — the replay_id
+    is only known after the finalizer runs. The page polls the
+    background_jobs row to find out when it's done; the metadata
+    field carries the replay_id once saved.
+    """
+    if mode not in REPLAY_MODES:
+        raise ValueError(f"Invalid mode {mode!r}; expected one of {REPLAY_MODES}")
+
+    search = get_search(search_id)
+    if not search:
+        raise ValueError(f"search {search_id} not found")
+
+    businesses = list_businesses(search_id=search_id)
+    if limit:
+        businesses = businesses[:limit]
+    # Drop biz with no website — replay can't do anything with them
+    businesses = [b for b in businesses if b.get("website")]
+    if not businesses:
+        raise ValueError(f"search {search_id} has no biz with websites to replay")
+
+    # Volume mode tracks a per-run cost cap — reset so a previous run
+    # doesn't gate this replay
+    if mode == "volume":
+        from src.volume_mode.pipeline import reset_run_budget
+        reset_run_budget(25.0)
+
+    from src import background_jobs
+
+    # Per-job worker — processes one business
+    def _replay_worker(biz, job_id):
+        # Store progress in the shared state dict
+        try:
+            row = _dispatch_scrape(biz, mode)
+        except Exception as e:
+            return False, f"❌ {biz.get('business_name')!r}: {type(e).__name__}: {e}"
+        row["business_id"] = biz.get("id")
+        row["business_name"] = biz.get("business_name")
+        row["website"] = biz.get("website")
+        row["address"] = biz.get("address")
+        orig = _original_row(biz)
+        orig["business_id"] = biz.get("id")
+        orig["business_name"] = biz.get("business_name")
+
+        with _REPLAY_STATE_LOCK:
+            state = _REPLAY_STATE.setdefault(job_id, {"rows": [], "started_at": time.time()})
+            state["rows"].append({"original": orig, "replay": row,
+                                    "changed": orig.get("best_email") != row.get("best_email")})
+
+        delta = "✱" if orig.get("best_email") != row["best_email"] else " "
+        return True, (f"{delta} {biz.get('business_name')[:40]:40} "
+                      f"{orig.get('best_email') or '—':30} → "
+                      f"{row.get('best_email') or '—':30}")
+
+    # Finalizer — aggregates + saves replay_runs row
+    def _replay_finalize(job_id, completed_count, was_cancelled):
+        with _REPLAY_STATE_LOCK:
+            state = _REPLAY_STATE.pop(job_id, None) or {"rows": [], "started_at": time.time()}
+        rows = state.get("rows") or []
+        if not rows and was_cancelled:
+            return  # Nothing to save
+        replay_rows = [r["replay"] for r in rows]
+        original_rows = [r["original"] for r in rows]
+        metrics = {
+            "elapsed_seconds": round(time.time() - state.get("started_at", time.time()), 1),
+            "baseline": _compute_metrics(original_rows),
+            "replay": _compute_metrics(replay_rows),
+        }
+        metrics["deltas"] = {
+            k: round(metrics["replay"][k] - metrics["baseline"][k], 1)
+            for k in metrics["replay"].keys()
+            if k != "n" and isinstance(metrics["replay"][k], (int, float))
+        }
+        try:
+            replay_id = save_replay(search_id, label, rows, metrics, mode=mode)
+            # Update the job's metadata so the page can display the
+            # replay_id when the job finishes
+            _stamp_replay_id_on_job(job_id, replay_id)
+        except Exception as e:
+            print(f"[replay finalize] save_replay failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
+
+    job_id = background_jobs.start(
+        job_type="replay",
+        items=businesses,
+        worker_fn=_replay_worker,
+        search_id=search_id,
+        max_workers=10,
+        metadata={
+            "search_label": (
+                f"replay '{label}' on search {search_id} "
+                f"({mode}, {len(businesses)} biz)"
+            ),
+            "replay_mode": mode,
+            "replay_label": label,
+        },
+        finalize_fn=_replay_finalize,
+    )
+    return job_id
+
+
+def _stamp_replay_id_on_job(job_id: str, replay_id: int) -> None:
+    """After save_replay persists, write the replay_id back into the
+    background_jobs metadata so the page can link to the result."""
+    try:
+        from src.storage import _connect, _cursor, _PARAM
+        import json as _json
+        conn = _connect()
+        try:
+            cur = _cursor(conn)
+            cur.execute(
+                f"SELECT metadata_json FROM background_jobs WHERE id = {_PARAM}",
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return
+            md = {}
+            try:
+                md = _json.loads((dict(row) if hasattr(row, "keys") else dict(row)).get("metadata_json") or "{}")
+            except Exception:
+                md = {}
+            md["replay_id"] = replay_id
+            cur.execute(
+                f"UPDATE background_jobs SET metadata_json = {_PARAM} WHERE id = {_PARAM}",
+                (_json.dumps(md), job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 def _print_metrics(metrics: dict) -> None:
     b = metrics["baseline"]
     r = metrics["replay"]

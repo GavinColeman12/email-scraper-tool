@@ -165,6 +165,19 @@ _CACHE: dict = {"priors": None, "computed_at": 0}
 _CACHE_TTL_SECONDS = 3600
 
 
+def invalidate_cache() -> None:
+    """Drop the cached priors so the next call recomputes from scratch.
+
+    Called by storage.update_business_emails / apply_rescue_upgrade
+    whenever a row gets a fresh NB-valid (or smtp_confirmed) verdict —
+    that's a new training data point, and the rescue / next scrape
+    should benefit from the fresh distribution immediately rather than
+    waiting up to an hour for the cache to expire.
+    """
+    _CACHE["priors"] = None
+    _CACHE["computed_at"] = 0
+
+
 def compute_learned_priors(force_refresh: bool = False) -> dict:
     """
     Walk every NB-valid business row, classify its email pattern, and

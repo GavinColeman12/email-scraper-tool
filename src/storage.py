@@ -438,6 +438,16 @@ def update_business_emails(business_id: int, scrape_result: dict) -> None:
             scrape_result.get("cms_catchall_hint") or None,
             business_id,
         ))
+        # Feedback loop: a fresh high-confidence row = new training data
+        # for learned_priors. Drop the 1-hour cache so the next rescue
+        # / scrape benefits from the updated pattern distribution
+        # immediately. Cheap (~50ms recompute on next call).
+        if nb_val in ("valid", "smtp_confirmed"):
+            try:
+                from src.learned_priors import invalidate_cache as _lp_invalidate
+                _lp_invalidate()
+            except Exception:
+                pass
         conn.commit()
     finally:
         conn.close()
@@ -520,6 +530,16 @@ def apply_rescue_upgrade(
             datetime.utcnow().isoformat(),
             business_id,
         ))
+        # Feedback loop: rescued high-confidence rows count as new
+        # training data — invalidate the learned_priors cache so
+        # subsequent scrapes / rescues immediately use the updated
+        # pattern distribution.
+        if is_send_safe:
+            try:
+                from src.learned_priors import invalidate_cache as _lp_invalidate
+                _lp_invalidate()
+            except Exception:
+                pass
         conn.commit()
     finally:
         conn.close()

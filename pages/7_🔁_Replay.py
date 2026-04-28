@@ -22,7 +22,7 @@ from src.replay_explain import (
     explain_biz, explain_change, bucket_label,
 )
 from src.dashboard_queries import search_metadata
-from scripts.replay_search import run_replay, REPLAY_MODES
+from scripts.replay_search import run_replay, start_replay_async, REPLAY_MODES
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -179,20 +179,31 @@ with tab_new:
         q = (m.get("query") or "").strip()[:40]
         return f"#{sid} · {created} · {biz} biz · {ind} · {q}"
 
-    c1, c2, c3 = st.columns([3, 2, 1])
-    search_id = c1.selectbox(
-        "Search to replay",
+    # ── Multi-select replay queue ─────────────────────────────────
+    # Operator can pick 1+ searches and chain them; great for letting
+    # 4-5 past runs replay overnight without manual baby-sitting.
+    st.markdown("**Pick one or more searches to replay** "
+                "(multi-select chains them in order):")
+    search_ids = st.multiselect(
+        "Searches to replay",
         options=[s["id"] for s in searches],
         format_func=_fmt_search,
+        help="Select multiple to chain replays in sequence. Each "
+             "will run as its own background job (visible in the "
+             "sidebar). Useful for overnight runs.",
     )
+
+    c2, c3 = st.columns([3, 1])
     label = c2.text_input(
         "Label (optional)", value="",
         placeholder="leave blank for auto: replay-<mode>-<date>",
-        help="Optional tag. Leave blank and we auto-generate "
-             "'replay-<mode>-<YYYYMMDD-HHMM>' so the row is still searchable.",
+        help="Tag applied to every replay in the chain. Leave blank "
+             "for auto: 'replay-<mode>-<YYYYMMDD-HHMM>'.",
     )
-    limit = c3.number_input("Limit", min_value=0, value=0, step=5,
-                            help="0 = replay every business in the search")
+    limit = c3.number_input("Limit per search", min_value=0, value=0, step=5,
+                            help="0 = replay every business in each search. "
+                                 "Set 10-20 to cap the per-search cost when "
+                                 "queueing multiple.")
 
     # Mode selector — defaults to volume (cheap, same columns as triangulation,
     # best for "what would today's volume scraper do with this old campaign").
@@ -206,27 +217,67 @@ with tab_new:
              "same search (e.g. old triangulation vs new volume).",
     )
 
-    if st.button("🔁 Run replay", type="primary"):
+    # Time + cost estimate — based on biz counts of selected searches
+    if search_ids:
+        biz_total = 0
+        for sid in search_ids:
+            m = meta.get(int(sid)) or {}
+            count = m.get("biz_count") or 0
+            biz_total += min(count, limit) if limit else count
+        # Empirical: volume mode ~30s/biz with 10 parallel workers ≈ 3s
+        # wall-clock per biz; triangulation ~45s with 10 workers ≈ 4.5s.
+        secs_per_biz = {
+            "volume": 3.5, "triangulation": 5.0, "deep": 1.5,
+            "verified": 1.0, "basic": 0.8,
+        }.get(mode, 3.0)
+        est_seconds = int(biz_total * secs_per_biz)
+        est_hours = est_seconds // 3600
+        est_min = (est_seconds % 3600) // 60
+        # Cost: volume ~$0.011/biz with rescue, triangulation ~$0.05
+        cost_per_biz = {
+            "volume": 0.011, "triangulation": 0.05, "deep": 0.010,
+            "verified": 0.0015, "basic": 0.0,
+        }.get(mode, 0.011)
+        est_cost = biz_total * cost_per_biz
+        time_str = (
+            f"~{est_hours}h {est_min}m" if est_hours
+            else f"~{est_min}m" if est_min
+            else f"~{est_seconds}s"
+        )
+        st.info(
+            f"📊 **Plan:** {len(search_ids)} replay(s), "
+            f"**{biz_total}** total businesses · est. wall time **{time_str}** "
+            f"· est. cost **~${est_cost:.2f}**. Each replay runs as a "
+            "separate background job — watch progress in the sidebar."
+        )
+
+    if st.button("🔁 Queue replay(s)", type="primary",
+                  disabled=not search_ids,
+                  help="Disabled until at least one search is selected."):
         from datetime import datetime as _dt
         run_label = (
             label.strip()
             or f"replay-{mode}-{_dt.now().strftime('%Y%m%d-%H%M')}"
         )
-        with st.spinner(
-            f"Running {mode} replay as '{run_label}'… each biz takes ~30-60s. "
-            "Progress streams to the terminal. A 60-biz replay is ~30-45 min."
-        ):
-            try:
-                replay_id = run_replay(
-                    search_id=int(search_id),
+        try:
+            queued = []
+            for sid in search_ids:
+                job_id = start_replay_async(
+                    search_id=int(sid),
                     label=run_label,
                     limit=int(limit) if limit else None,
-                    verbose=False,
                     mode=mode,
                 )
-            except Exception as e:
-                st.error(f"Replay failed: {e}")
-                st.stop()
+                queued.append((int(sid), job_id))
+        except Exception as e:
+            st.error(f"Failed to queue replays: {e}")
+            st.stop()
+        st.success(
+            f"🚀 Queued **{len(queued)}** replay(s). Watch progress in the "
+            "sidebar 🟢 Active jobs panel — they'll appear there momentarily. "
+            "When each finishes, the **🔍 Inspect** tab will show it."
+        )
+        st.rerun()
         st.success(f"✅ Replay #{replay_id} ({mode}) saved. Switch to **🔍 Inspect** to read it.")
         st.rerun()
 

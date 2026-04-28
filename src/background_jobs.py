@@ -174,10 +174,18 @@ def _finish_job(job_id: str, status: str, error_message: str = "") -> None:
 
 def start(job_type: str, items: list, worker_fn,
           search_id=None, max_workers: int = 6,
-          metadata: dict = None) -> str:
+          metadata: dict = None,
+          finalize_fn=None) -> str:
     """
     Kick off a background job and return job_id.
-    worker_fn: worker_fn(item, job_id) -> (ok: bool, log_msg: str)
+
+    Args:
+      worker_fn: worker_fn(item, job_id) -> (ok: bool, log_msg: str)
+      finalize_fn: optional callable(job_id, completed_count, was_cancelled)
+        called once after every worker has completed (success OR
+        cancellation). Used by replay to aggregate per-biz results
+        into the replay_runs table after all workers finish.
+        Errors in finalize_fn are logged but don't fail the job.
     """
     init_db()
     job_id = str(uuid.uuid4())
@@ -220,12 +228,27 @@ def start(job_type: str, items: list, worker_fn,
                 )
             if not cancelled_early:
                 ex.shutdown(wait=True)
-            _finish_job(job_id, "cancelled" if is_cancelled(job_id) else "done")
+            was_cancelled = is_cancelled(job_id)
+            # Finalizer hook — fires after all workers complete (or
+            # cancel). Used by replay to aggregate per-biz results
+            # into the replay_runs row before the job is marked done.
+            if finalize_fn is not None:
+                try:
+                    finalize_fn(job_id, completed, was_cancelled)
+                except Exception as e:
+                    print(f"[bg job {job_id[:8]}] finalize_fn error: "
+                          f"{type(e).__name__}: {e}", flush=True)
+            _finish_job(job_id, "cancelled" if was_cancelled else "done")
         except Exception as e:
             try:
                 ex.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
+            if finalize_fn is not None:
+                try:
+                    finalize_fn(job_id, completed, True)
+                except Exception:
+                    pass
             _finish_job(job_id, "failed",
                         error_message=f"{type(e).__name__}: {e}\n{traceback.format_exc()[:1000]}")
         finally:
