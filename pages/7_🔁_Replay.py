@@ -124,7 +124,10 @@ credits (Phase 1-3 caches live 14-90 days).
   regressed, ⚫ still empty. Download the wins as CSV (the rows the
   new run caught that the old missed).
 
-**Cost:** ~$0 per replay. Safe to run as many as you want.
+**Cost:** ~$0 per replay. Paid retries (NB-unknown auto-retry,
+SearchApi rescue-empties, LinkedIn fallback) are suppressed in
+replay mode — cached results from prior live scrapes are reused
+instead. Safe to run as many as you want.
 """
     )
 
@@ -233,12 +236,12 @@ with tab_new:
         est_seconds = int(biz_total * secs_per_biz)
         est_hours = est_seconds // 3600
         est_min = (est_seconds % 3600) // 60
-        # Cost: volume ~$0.011/biz with rescue, triangulation ~$0.05
-        cost_per_biz = {
-            "volume": 0.011, "triangulation": 0.05, "deep": 0.010,
-            "verified": 0.0015, "basic": 0.0,
-        }.get(mode, 0.011)
-        est_cost = biz_total * cost_per_biz
+        # Replay mode is FREE — paid retries are suppressed (no fresh
+        # NB calls, no SearchApi rescue, no LinkedIn fallback). Cached
+        # NB results are still consulted ($0). The rare exception:
+        # Haiku name-classifier + email-picker calls on uncached
+        # candidate-set hashes (~$0.001/biz worst case).
+        est_cost = biz_total * 0.001  # max ~$0.20 on a 200-biz replay
         time_str = (
             f"~{est_hours}h {est_min}m" if est_hours
             else f"~{est_min}m" if est_min
@@ -247,8 +250,10 @@ with tab_new:
         st.info(
             f"📊 **Plan:** {len(search_ids)} replay(s), "
             f"**{biz_total}** total businesses · est. wall time **{time_str}** "
-            f"· est. cost **~${est_cost:.2f}**. Each replay runs as a "
-            "separate background job — watch progress in the sidebar."
+            f"· est. cost **~${est_cost:.2f}** (replay mode skips "
+            f"paid retries — cached NB / SearchApi / LinkedIn results "
+            "are reused). Each replay runs as a separate background "
+            "job — watch progress in the sidebar."
         )
 
     if st.button("🔁 Queue replay(s)", type="primary",

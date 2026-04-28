@@ -151,9 +151,14 @@ def _serialise_legacy_dict(d: dict) -> dict:
     }
 
 
-def _dispatch_scrape(business: dict, mode: str) -> dict:
+def _dispatch_scrape(business: dict, mode: str,
+                       replay_mode: bool = False) -> dict:
     """Route a single biz to the requested pipeline and return a uniform
-    replay-row dict. Keeps run_replay() agnostic of mode internals."""
+    replay-row dict. Keeps run_replay() agnostic of mode internals.
+
+    When `replay_mode=True`, paid retry paths are suppressed in volume
+    mode so re-running a past search through today's logic costs ~$0.
+    """
     addr = business.get("address") or business.get("location") or ""
     city = addr.split(",")[0].strip() if addr else ""
     biz_type = business.get("business_type") or ""
@@ -161,7 +166,11 @@ def _dispatch_scrape(business: dict, mode: str) -> dict:
 
     if mode == "volume":
         from src.volume_mode import scrape_volume
-        vres = scrape_volume(business, use_neverbounce=True)
+        vres = scrape_volume(
+            business,
+            use_neverbounce=True,
+            replay_mode=replay_mode,
+        )
         return _serialise_result(vres)
     if mode == "triangulation":
         return _serialise_result(scrape_with_triangulation(business))
@@ -350,11 +359,14 @@ def start_replay_async(search_id: int, label: str, *,
 
     from src import background_jobs
 
-    # Per-job worker — processes one business
+    # Per-job worker — processes one business in REPLAY MODE so no
+    # paid retries fire (NB-unknown auto-retry skipped, rescue-empties
+    # SearchApi disabled, LinkedIn fallback skipped, NB calls served
+    # from cache only). Replays should cost ~$0 — what the original
+    # "Phase 1-3 caches live 14-90 days" promise guaranteed.
     def _replay_worker(biz, job_id):
-        # Store progress in the shared state dict
         try:
-            row = _dispatch_scrape(biz, mode)
+            row = _dispatch_scrape(biz, mode, replay_mode=True)
         except Exception as e:
             return False, f"❌ {biz.get('business_name')!r}: {type(e).__name__}: {e}"
         row["business_id"] = biz.get("id")

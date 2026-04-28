@@ -112,6 +112,7 @@ def scrape_volume(
     budget_per_biz_usd: float = BUDGET_PER_BIZ_USD,
     include_wayback: bool = True,
     rescue_empties_with_searchapi: bool = False,
+    replay_mode: bool = False,
 ) -> VolumeResult:
     """
     Discover an email for a business using crawl + free signals first
@@ -125,8 +126,20 @@ def scrape_volume(
         recover founders not on the team page / LinkedIn / Wayback.
         Default False because it's not free — opt-in per campaign.
 
+      replay_mode: when True, suppress every paid retry path:
+        - NB-unknown auto-retry stays cached (no fresh NB call)
+        - rescue-empties SearchApi forced off
+        - LinkedIn fallback skipped when not already cached
+        - Cached NB results still consulted (free)
+        Used by start_replay_async() so re-running a past search
+        through today's logic costs ~$0 — the original "Phase 1-3
+        caches live 14-90 days, near-zero cost" promise.
+
     Returns a VolumeResult shaped to feed the shared export row builder.
     """
+    # Replay mode forces all paid-retry paths off
+    if replay_mode:
+        rescue_empties_with_searchapi = False
     # Late imports to avoid circular dependency; universal_pipeline
     # imports from bounce_tracker which indirectly touches volume_mode
     # in some deployments.
@@ -454,7 +467,12 @@ def scrape_volume(
         dm = ranked[0] if ranked else None
 
     # ── Phase 4: LinkedIn fallback (paid, ONLY if no DM yet) ──
-    if dm is None and use_neverbounce and _run_budget_remaining() > COST_LINKEDIN_CALL:
+    # Skipped in replay_mode unless the call would hit cache — the
+    # cache key in _agent_linkedin_gated already short-circuits with
+    # cached results, so we can fire it but it'll usually be free.
+    # When replay_mode is on, suppress the fresh API call entirely.
+    if (dm is None and use_neverbounce and not replay_mode
+            and _run_budget_remaining() > COST_LINKEDIN_CALL):
         if biz_cost + COST_LINKEDIN_CALL <= budget_per_biz_usd:
             result.agents_run.append("linkedin_fallback")
             try:
@@ -726,6 +744,15 @@ def scrape_volume(
             # Skip if already NB'd (shouldn't happen, defence-in-depth)
             if cand.nb_result is not None:
                 continue
+            # Replay mode: only consult cached NB results, never make
+            # a fresh paid API call. Use _Cache directly to read
+            # without the live-call fallback path.
+            if replay_mode:
+                cached = cache.get("nb_verify", cand.email)
+                if cached is not None and not cached.get("credit_exhausted"):
+                    cand.nb_result = cached.get("result")
+                # else: leave nb_result=None — replay shows "untested"
+                continue
             # CMS skip: on platform-mailbox CMSes (Wix / Weebly / Duda
             # / Shopify / GoDaddy Builder), bucket-D/E guesses will
             # almost always NB as catchall. Save the call — mark as
@@ -776,8 +803,11 @@ def scrape_volume(
     #
     # 2 retries × $0.003 each = $0.006 max per UNKNOWN winner.
     # On a 200-biz medspa run with 50% unknown that's $0.60 incremental.
+    #
+    # Skipped in replay_mode — replays should re-run today's logic
+    # against cached evidence WITHOUT burning fresh NB credits.
     if (winner is not None and winner.nb_result == "unknown"
-            and use_neverbounce):
+            and use_neverbounce and not replay_mode):
         retry_attempts = 0
         retry_log: list = []
         for attempt_idx, sleep_before in enumerate([0.5, 5.0]):
@@ -821,8 +851,11 @@ def scrape_volume(
     # Marks the row with "smtp_confirmed" in evidence_trail; ranking
     # treats it like NB-catchall (volume_scraped tier) which is a
     # meaningful upgrade from UNKNOWN (volume_review).
+    #
+    # Skipped in replay_mode — SMTP probes are free but take 5-10s
+    # each and the user wants replays fast.
     if (winner is not None and winner.nb_result == "unknown"
-            and use_neverbounce):
+            and use_neverbounce and not replay_mode):
         try:
             from src.email_verifier import verify_smtp
             probe = verify_smtp(winner.email, timeout=8)
