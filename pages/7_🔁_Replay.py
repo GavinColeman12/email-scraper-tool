@@ -423,6 +423,121 @@ with tab_inspect:
                   delta_color="inverse")
     mc[4].metric("Pattern triangulated", f"{metrics.get('pattern_detected_pct', 0):.1f}%")
 
+    # ── vs ORIGINAL SCRAPE — what did this replay recover? ────────────
+    # Replays don't find new businesses (they re-process the same set
+    # from a past search), but they DO find new/better emails for those
+    # businesses under today's logic. This panel is the answer to "did
+    # the replay actually accomplish anything?"
+    st.divider()
+    st.subheader("📈 vs. original scrape — what today's logic recovered")
+    st.caption(
+        "Diff between this replay (today's logic) and what was in the DB "
+        "at scrape time. **Newly caught** = rows that had no valid email "
+        "originally but the replay produced a NB-valid one — that's where "
+        "your recent code changes paid off."
+    )
+
+    newly_caught_rows: list = []
+    stable_good_rows: list = []
+    regressed_rows: list = []
+    still_empty_rows: list = []
+    pick_changed_rows: list = []
+    biz_lookup_inspect_diff: dict = {}
+    if full.get("original_search_id"):
+        for biz_full in storage.list_businesses(search_id=int(full["original_search_id"])):
+            biz_lookup_inspect_diff[biz_full["id"]] = biz_full
+
+    for row in businesses:
+        before = row.get("original") or {}
+        after = row.get("replay") or {}
+        outcome = _outcome(before, after)
+        biz_id = (after.get("business_id") or before.get("business_id"))
+        export = _export_row(biz_id, before, after, biz_lookup_inspect_diff)
+        if outcome == "newly_caught":
+            newly_caught_rows.append(export)
+        elif outcome == "stable_good":
+            stable_good_rows.append(export)
+            if before.get("best_email") != after.get("best_email"):
+                pick_changed_rows.append(export)
+        elif outcome == "regressed":
+            regressed_rows.append(export)
+        else:
+            still_empty_rows.append(export)
+
+    dm1, dm2, dm3, dm4 = st.columns(4)
+    dm1.metric(
+        "🟢 Newly caught", len(newly_caught_rows),
+        delta=(f"+{len(newly_caught_rows)} new wins"
+                if newly_caught_rows else None),
+        help="Rows where the original scrape produced no NB-valid email "
+             "but today's logic does. THESE ARE THE ROWS YOU WANT TO "
+             "ADD TO YOUR OUTREACH.",
+    )
+    dm2.metric(
+        "⚪ Stable", len(stable_good_rows),
+        help="NB-valid in both the original scrape AND this replay — "
+             "no change in send-readiness.",
+    )
+    dm3.metric(
+        "🔴 Regressed", len(regressed_rows),
+        delta=(f"-{len(regressed_rows)} lost" if regressed_rows else None),
+        delta_color="inverse",
+        help="Rows that WERE NB-valid in the original scrape but the "
+             "replay didn't produce a valid email. Investigate before "
+             "merging the code change.",
+    )
+    dm4.metric(
+        "⚫ Still empty", len(still_empty_rows),
+        help="No valid email in either run — these biz are genuinely "
+             "hard to reach via cold email.",
+    )
+
+    # Inline downloads — replay's main payoff is the newly-caught CSV
+    dlc1, dlc2, dlc3, dlc4 = st.columns(4)
+    rid_for_export = full["id"]
+    with dlc1:
+        st.download_button(
+            f"🟢 Download {len(newly_caught_rows)} newly-caught",
+            data=_csv_bytes(newly_caught_rows),
+            file_name=f"replay_{rid_for_export}_newly_caught.csv",
+            mime="text/csv",
+            disabled=not newly_caught_rows,
+            type="primary",
+            help="Drop into outreach — these are the rows today's logic "
+                 "recovered that your original scrape missed.",
+        )
+    with dlc2:
+        st.download_button(
+            f"🔀 Download {len(pick_changed_rows)} pick-changed",
+            data=_csv_bytes(pick_changed_rows),
+            file_name=f"replay_{rid_for_export}_pick_changed.csv",
+            mime="text/csv",
+            disabled=not pick_changed_rows,
+            help="Same biz, NB-valid in both runs, but TODAY picked a "
+                 "different email (e.g. learned-priors flipped which "
+                 "pattern wins). Audit before sending.",
+        )
+    with dlc3:
+        st.download_button(
+            f"🔴 Download {len(regressed_rows)} regressed",
+            data=_csv_bytes(regressed_rows),
+            file_name=f"replay_{rid_for_export}_regressed.csv",
+            mime="text/csv",
+            disabled=not regressed_rows,
+            help="Investigate — today's logic LOST emails the original "
+                 "scrape had. Could be a real regression in code logic.",
+        )
+    with dlc4:
+        st.download_button(
+            f"⚫ Download {len(still_empty_rows)} still-empty",
+            data=_csv_bytes(still_empty_rows),
+            file_name=f"replay_{rid_for_export}_still_empty.csv",
+            mime="text/csv",
+            disabled=not still_empty_rows,
+            help="No valid email in either run — for manual research / "
+                 "phone outreach.",
+        )
+
     # Explain every biz
     st.divider()
     st.subheader("Per-business decisions (with WHY)")
