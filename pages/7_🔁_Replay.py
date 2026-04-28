@@ -17,12 +17,39 @@ import pandas as pd
 import streamlit as st
 
 from src import storage
-from src.replay_storage import list_replays, get_replay, init_replay_tables
+from src.replay_storage import (
+    list_replays as _list_replays_uncached,
+    get_replay,
+    init_replay_tables,
+)
 from src.replay_explain import (
     explain_biz, explain_change, bucket_label,
 )
-from src.dashboard_queries import search_metadata
+from src.dashboard_queries import (
+    search_metadata as _search_metadata_uncached,
+)
 from scripts.replay_search import run_replay, start_replay_async, REPLAY_MODES
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Cached wrappers — list_replays + search_metadata each take 5-7s on
+# Postgres with our row count. Without caching, every render of the
+# Replay page (3 tabs × 2 calls each + sidebar poll = 7+ calls) blocks
+# the UI for ~25-40s and looks like the page is broken. 30s TTL means
+# fresh after a new replay is queued (page reruns immediately on Queue
+# button via st.rerun).
+# ──────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_replays():
+    return _list_replays_uncached()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def search_metadata(search_ids):
+    # Streamlit hashes args for cache keys — convert list to tuple so
+    # it's hashable
+    return _search_metadata_uncached(list(search_ids))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -277,13 +304,16 @@ with tab_new:
         except Exception as e:
             st.error(f"Failed to queue replays: {e}")
             st.stop()
+        # Invalidate the list_replays + search_metadata caches so the
+        # newly queued replay shows up immediately in the past-replays
+        # table without waiting for the 30s TTL to expire.
+        list_replays.clear()
+        search_metadata.clear()
         st.success(
             f"🚀 Queued **{len(queued)}** replay(s). Watch progress in the "
             "sidebar 🟢 Active jobs panel — they'll appear there momentarily. "
             "When each finishes, the **🔍 Inspect** tab will show it."
         )
-        st.rerun()
-        st.success(f"✅ Replay #{replay_id} ({mode}) saved. Switch to **🔍 Inspect** to read it.")
         st.rerun()
 
     st.divider()
