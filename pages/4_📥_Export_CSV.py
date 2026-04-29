@@ -316,6 +316,115 @@ if filtered:
     except Exception as e:
         st.warning(f"Send-safety split failed: {e}")
 
+    # ── Second-touch follow-ups ────────────────────────────────────────
+    # Independent of the current search filter — operates on the
+    # entire email_sends history. Pulls prospects who got a first
+    # touch ≥ N days ago, haven't replied, didn't bounce, no
+    # follow-up sent yet, domain not in bounce blocklist, local part
+    # not a generic shared-inbox alias.
+    st.markdown("---")
+    st.markdown("### ✉️ Second-touch follow-ups")
+    st.caption(
+        "Prospects you emailed 7+ days ago who haven't replied. "
+        "Filters out bounces, replied, already-followed-up, generic "
+        "inboxes, and domains poisoned by prior bounces. Independent "
+        "of the search filter above — operates on your full send history."
+    )
+
+    try:
+        from src.follow_up import find_followup_candidates, followup_summary
+        summary = followup_summary()
+
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric("Total sends",   summary.get("total_sends", 0))
+        sm2.metric("Distinct emails", summary.get("distinct_emails", 0))
+        sm3.metric("Bounces",       summary.get("total_bounced", 0),
+                    delta_color="inverse")
+        sm4.metric("Replies",       summary.get("total_replied", 0))
+
+        fu1, fu2, fu3 = st.columns([1, 1, 2])
+        with fu1:
+            days_min = st.number_input(
+                "Min days since 1st touch",
+                min_value=1, max_value=90, value=7, step=1,
+                help="Industry standard: 5-7 days between cold-email "
+                     "touches. Shorter is too pushy; longer risks the "
+                     "thread getting buried.",
+            )
+        with fu2:
+            days_max = st.number_input(
+                "Max days (cap stale prospects)",
+                min_value=days_min, max_value=180, value=30, step=1,
+                help="Older first touches are stale — better to send a "
+                     "fresh first-touch with new copy than a 60-day-old "
+                     "follow-up. Default 30 days.",
+            )
+        with fu3:
+            exclude_generic = st.checkbox(
+                "Exclude generic locals (info@, smile@, etc.)",
+                value=True,
+                help="Old sends to shared inboxes (pre-stopword-list "
+                     "fix) often didn't reach a real person — following "
+                     "up there mostly annoys reception. Default ON.",
+            )
+
+        candidates = find_followup_candidates(
+            days_min=int(days_min),
+            days_max=int(days_max),
+            exclude_bounce_domains=True,
+            exclude_generic_locals=bool(exclude_generic),
+        )
+
+        st.markdown(f"#### {len(candidates)} prospects eligible for follow-up")
+
+        if candidates:
+            preview_df = pd.DataFrame([
+                {
+                    "Email": c["email"],
+                    "Business Name": c["business_name"],
+                    "Type": c["business_type"],
+                    "Days ago": c["days_since_first_touch"],
+                    "Contact": c["contact_name"],
+                    "Title": c["contact_title"],
+                    "Phone": c["phone"],
+                    "Address": c["address"],
+                    "Website": c["website"],
+                    "Rating": c["rating"],
+                    "First sent": c["first_sent_at"][:10],
+                    "First-touch source": c["first_touch_pattern"][:60],
+                }
+                for c in candidates[:50]
+            ])
+            st.dataframe(
+                preview_df, use_container_width=True, hide_index=True,
+                column_config={
+                    "Website": st.column_config.LinkColumn("Website"),
+                    "Days ago": st.column_config.NumberColumn(format="%d d"),
+                },
+            )
+            if len(candidates) > 50:
+                st.caption(
+                    f"Showing first 50 (oldest first). Full list of "
+                    f"{len(candidates)} in the CSV download below."
+                )
+
+            buf2 = io.StringIO()
+            pd.DataFrame(candidates).to_csv(buf2, index=False)
+            st.download_button(
+                f"📥 Download {len(candidates)} follow-up prospects",
+                data=buf2.getvalue(),
+                file_name=f"followup_send_{int(days_min)}-{int(days_max)}d.csv",
+                mime="text/csv",
+                type="primary",
+            )
+        else:
+            st.info(
+                "No prospects in this window. Try widening the day range, "
+                "or wait until your first touches age into the window."
+            )
+    except Exception as e:
+        st.warning(f"Follow-up exporter failed: {e}")
+
     # Apollo-format CSV was removed — it silently dropped the
     # triangulation evidence (Place ID, Professional IDs, Score/Tier,
     # Confidence, Email Source/Status), losing ~$5/business of enrichment
