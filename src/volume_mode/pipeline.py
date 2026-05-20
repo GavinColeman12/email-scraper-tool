@@ -905,7 +905,6 @@ def scrape_volume(
     # match over any incumbent DM — the person whose last name is in
     # the domain is almost always the founder.
     if winner and ranked:
-        from src.name_equivalence import names_match
         winner_local = (winner.email.split("@", 1)[0].lower()
                         if "@" in winner.email else "")
         domain_core = domain.lower() if domain else ""

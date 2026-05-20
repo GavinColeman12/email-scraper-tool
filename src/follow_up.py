@@ -58,7 +58,7 @@ def find_followup_candidates(
       (so the user knows when they originally reached out).
     """
     try:
-        from src.storage import _connect, _cursor, _PARAM, USE_PG
+        from src.storage import _connect, _cursor, _PARAM
     except Exception:
         return []
 

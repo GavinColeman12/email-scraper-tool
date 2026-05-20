@@ -367,7 +367,7 @@ def domains_with_bounces() -> set:
     Reads the email_sends table directly via storage helpers.
     """
     try:
-        from src.storage import _connect, _cursor, USE_PG
+        from src.storage import _connect, _cursor
     except Exception:
         return set()
     conn = _connect()
