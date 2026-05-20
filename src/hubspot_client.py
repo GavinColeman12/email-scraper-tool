@@ -15,6 +15,12 @@ from hubspot.crm.companies import (
     PublicObjectSearchRequest,
     SimplePublicObjectInputForCreate as CompanyCreate,
 )
+from hubspot.crm.contacts import SimplePublicObjectInputForCreate as ContactCreate
+from hubspot.crm.contacts import (
+    Filter as ContactFilter,
+    FilterGroup as ContactFilterGroup,
+    PublicObjectSearchRequest as ContactSearchRequest,
+)
 
 
 class HubSpotClient:
@@ -25,6 +31,8 @@ class HubSpotClient:
         # storing references here ensures the same instance is patched in tests.
         self._companies_api = self._api.crm.companies.basic_api
         self._companies_search_api = self._api.crm.companies.search_api
+        self._contacts_api = self._api.crm.contacts.basic_api
+        self._contacts_search_api = self._api.crm.contacts.search_api
 
     def find_company_by_domain(self, domain: str) -> Optional[str]:
         request = PublicObjectSearchRequest(
@@ -53,3 +61,33 @@ class HubSpotClient:
         if existing:
             return existing
         return self.create_company(properties)
+
+    def create_contact(self, properties: dict) -> str:
+        payload = ContactCreate(properties=properties)
+        result = self._contacts_api.create(
+            simple_public_object_input_for_create=payload
+        )
+        return result.id
+
+    def find_contact_by_email(self, email: str) -> Optional[str]:
+        request = ContactSearchRequest(
+            filter_groups=[
+                ContactFilterGroup(
+                    filters=[ContactFilter(property_name="email", operator="EQ", value=email)]
+                )
+            ],
+            properties=["email"],
+            limit=1,
+        )
+        response = self._contacts_search_api.do_search(
+            public_object_search_request=request
+        )
+        if response.results:
+            return response.results[0].id
+        return None
+
+    def upsert_contact(self, email: str, properties: dict) -> str:
+        existing = self.find_contact_by_email(email)
+        if existing:
+            return existing
+        return self.create_contact(properties)

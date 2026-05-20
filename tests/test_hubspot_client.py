@@ -95,3 +95,61 @@ def test_upsert_company_returns_existing_id_when_found(client):
 
     assert company_id == "existing-id"
     mock_create.assert_not_called()
+
+
+def test_create_contact_returns_id(client):
+    fake_response = MagicMock()
+    fake_response.id = "c-123"
+    with patch.object(
+        client._contacts_api, "create", return_value=fake_response
+    ) as mock_create:
+        new_id = client.create_contact(
+            properties={"email": "joe@joespizza.com", "firstname": "Joe", "lastname": "P"}
+        )
+    assert new_id == "c-123"
+    mock_create.assert_called_once()
+
+
+def test_find_contact_by_email_returns_id_when_found(client):
+    found = MagicMock()
+    found.id = "c-999"
+    response = MagicMock()
+    response.results = [found]
+    with patch.object(
+        client._contacts_search_api, "do_search", return_value=response
+    ):
+        assert client.find_contact_by_email("joe@joespizza.com") == "c-999"
+
+
+def test_find_contact_by_email_returns_none_when_missing(client):
+    response = MagicMock()
+    response.results = []
+    with patch.object(
+        client._contacts_search_api, "do_search", return_value=response
+    ):
+        assert client.find_contact_by_email("missing@nowhere.com") is None
+
+
+def test_upsert_contact_creates_when_not_found(client):
+    with (
+        patch.object(client, "find_contact_by_email", return_value=None),
+        patch.object(client, "create_contact", return_value="c-new"),
+    ):
+        assert (
+            client.upsert_contact(
+                email="new@joespizza.com", properties={"email": "new@joespizza.com"}
+            )
+            == "c-new"
+        )
+
+
+def test_upsert_contact_returns_existing_id_when_found(client):
+    with (
+        patch.object(client, "find_contact_by_email", return_value="c-existing"),
+        patch.object(client, "create_contact") as mock_create,
+    ):
+        result = client.upsert_contact(
+            email="existing@joespizza.com", properties={"email": "existing@joespizza.com"}
+        )
+        assert result == "c-existing"
+        mock_create.assert_not_called()
