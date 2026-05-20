@@ -67,3 +67,31 @@ def test_find_company_by_domain_returns_none_when_missing(client):
         company_id = client.find_company_by_domain("nonexistent.com")
 
     assert company_id is None
+
+
+def test_upsert_company_creates_when_not_found(client):
+    """upsert_company calls find first; creates when not found."""
+    with (
+        patch.object(client, "find_company_by_domain", return_value=None),
+        patch.object(client, "create_company", return_value="new-id") as mock_create,
+    ):
+        company_id = client.upsert_company(
+            domain="newone.com", properties={"name": "New Co", "domain": "newone.com"}
+        )
+
+    assert company_id == "new-id"
+    mock_create.assert_called_once()
+
+
+def test_upsert_company_returns_existing_id_when_found(client):
+    """upsert_company returns existing ID and does NOT call create."""
+    with (
+        patch.object(client, "find_company_by_domain", return_value="existing-id"),
+        patch.object(client, "create_company") as mock_create,
+    ):
+        company_id = client.upsert_company(
+            domain="existing.com", properties={"name": "Existing Co"}
+        )
+
+    assert company_id == "existing-id"
+    mock_create.assert_not_called()

@@ -47,3 +47,9 @@ class HubSpotClient:
             simple_public_object_input_for_create=payload
         )
         return result.id
+
+    def upsert_company(self, domain: str, properties: dict) -> str:
+        existing = self.find_company_by_domain(domain)
+        if existing:
+            return existing
+        return self.create_company(properties)
