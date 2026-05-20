@@ -38,3 +38,32 @@ def test_create_company_returns_id(client):
     assert payload.properties["name"] == "Joe's Pizza"
     assert payload.properties["domain"] == "joespizza.com"
     assert payload.properties["cuisine_type"] == "Pizza"
+
+
+def test_find_company_by_domain_returns_id_when_found(client):
+    """find_company_by_domain returns the matching company ID, or None if not found."""
+    found = MagicMock()
+    found.id = "99999"
+    response = MagicMock()
+    response.results = [found]
+
+    with patch.object(
+        client._companies_search_api, "do_search", return_value=response
+    ) as mock_search:
+        company_id = client.find_company_by_domain("joespizza.com")
+
+    assert company_id == "99999"
+    mock_search.assert_called_once()
+
+
+def test_find_company_by_domain_returns_none_when_missing(client):
+    """find_company_by_domain returns None if no company matches the domain."""
+    response = MagicMock()
+    response.results = []
+
+    with patch.object(
+        client._companies_search_api, "do_search", return_value=response
+    ):
+        company_id = client.find_company_by_domain("nonexistent.com")
+
+    assert company_id is None
