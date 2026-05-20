@@ -153,3 +153,28 @@ def test_upsert_contact_returns_existing_id_when_found(client):
         )
         assert result == "c-existing"
         mock_create.assert_not_called()
+
+
+def test_create_deal_returns_id(client):
+    fake_response = MagicMock()
+    fake_response.id = "d-555"
+    with patch.object(
+        client._deals_api, "create", return_value=fake_response
+    ) as mock_create:
+        deal_id = client.create_deal(
+            properties={"dealname": "Joe's Pizza - Audit", "dealstage": "cold_outreach"},
+            company_id="co-1",
+            contact_id="c-1",
+        )
+    assert deal_id == "d-555"
+    payload = mock_create.call_args.kwargs["simple_public_object_input_for_create"]
+    assert payload.associations is not None
+    assert len(payload.associations) == 2
+
+
+def test_associate_contact_to_company_calls_api(client):
+    with patch.object(
+        client._associations_v4_api, "create"
+    ) as mock_associate:
+        client.associate_contact_to_company(contact_id="c-1", company_id="co-1")
+    mock_associate.assert_called_once()

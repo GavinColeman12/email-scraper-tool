@@ -21,6 +21,11 @@ from hubspot.crm.contacts import (
     FilterGroup as ContactFilterGroup,
     PublicObjectSearchRequest as ContactSearchRequest,
 )
+from hubspot.crm.deals import (
+    SimplePublicObjectInputForCreate as DealCreate,
+    PublicAssociationsForObject,
+    AssociationSpec,
+)
 
 
 class HubSpotClient:
@@ -33,6 +38,8 @@ class HubSpotClient:
         self._companies_search_api = self._api.crm.companies.search_api
         self._contacts_api = self._api.crm.contacts.basic_api
         self._contacts_search_api = self._api.crm.contacts.search_api
+        self._deals_api = self._api.crm.deals.basic_api
+        self._associations_v4_api = self._api.crm.associations.v4.basic_api
 
     def find_company_by_domain(self, domain: str) -> Optional[str]:
         request = PublicObjectSearchRequest(
@@ -91,3 +98,53 @@ class HubSpotClient:
         if existing:
             return existing
         return self.create_contact(properties)
+
+    def create_deal(
+        self,
+        properties: dict,
+        company_id: Optional[str] = None,
+        contact_id: Optional[str] = None,
+    ) -> str:
+        associations: list[PublicAssociationsForObject] = []
+        if company_id:
+            associations.append(
+                PublicAssociationsForObject(
+                    to={"id": company_id},
+                    types=[
+                        AssociationSpec(
+                            association_category="HUBSPOT_DEFINED",
+                            association_type_id=5,  # deal_to_company
+                        )
+                    ],
+                )
+            )
+        if contact_id:
+            associations.append(
+                PublicAssociationsForObject(
+                    to={"id": contact_id},
+                    types=[
+                        AssociationSpec(
+                            association_category="HUBSPOT_DEFINED",
+                            association_type_id=3,  # deal_to_contact
+                        )
+                    ],
+                )
+            )
+        payload = DealCreate(properties=properties, associations=associations)
+        result = self._deals_api.create(
+            simple_public_object_input_for_create=payload
+        )
+        return result.id
+
+    def associate_contact_to_company(self, contact_id: str, company_id: str) -> None:
+        from hubspot.crm.associations.v4 import AssociationSpec as V4Spec
+
+        self._associations_v4_api.create(
+            object_type="contacts",
+            object_id=contact_id,
+            to_object_type="companies",
+            to_object_id=company_id,
+            association_spec=[
+                V4Spec(association_category="HUBSPOT_DEFINED", association_type_id=1)
+            ],
+        )
