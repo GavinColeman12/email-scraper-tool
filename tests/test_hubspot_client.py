@@ -178,3 +178,22 @@ def test_associate_contact_to_company_calls_api(client):
     ) as mock_associate:
         client.associate_contact_to_company(contact_id="c-1", company_id="co-1")
     mock_associate.assert_called_once()
+
+
+def test_create_company_retries_on_rate_limit(client):
+    """create_company should retry on HubSpot 429 rate limit responses."""
+    from hubspot.crm.companies.exceptions import ApiException
+
+    rate_limit_error = ApiException(status=429, reason="Too Many Requests")
+    success = MagicMock()
+    success.id = "after-retry"
+
+    with patch.object(
+        client._companies_api,
+        "create",
+        side_effect=[rate_limit_error, rate_limit_error, success],
+    ) as mock_create:
+        result_id = client.create_company(properties={"name": "Retry Co"})
+
+    assert result_id == "after-retry"
+    assert mock_create.call_count == 3

@@ -9,6 +9,15 @@ from __future__ import annotations
 from typing import Optional
 
 from hubspot import HubSpot
+from hubspot.crm.companies.exceptions import ApiException as CompanyApiException
+from hubspot.crm.contacts.exceptions import ApiException as ContactApiException
+from hubspot.crm.deals.exceptions import ApiException as DealApiException
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 from hubspot.crm.companies import (
     Filter,
     FilterGroup,
@@ -25,6 +34,21 @@ from hubspot.crm.deals import (
     SimplePublicObjectInputForCreate as DealCreate,
     PublicAssociationsForObject,
     AssociationSpec,
+)
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, (CompanyApiException, ContactApiException, DealApiException))
+        and getattr(exc, "status", None) == 429
+    )
+
+
+_retry_on_rate_limit = retry(
+    retry=retry_if_exception(_is_rate_limit),
+    wait=wait_exponential(multiplier=1, min=1, max=30),
+    stop=stop_after_attempt(5),
+    reraise=True,
 )
 
 
@@ -56,6 +80,7 @@ class HubSpotClient:
             return response.results[0].id
         return None
 
+    @_retry_on_rate_limit
     def create_company(self, properties: dict) -> str:
         payload = CompanyCreate(properties=properties)
         result = self._companies_api.create(
@@ -69,6 +94,7 @@ class HubSpotClient:
             return existing
         return self.create_company(properties)
 
+    @_retry_on_rate_limit
     def create_contact(self, properties: dict) -> str:
         payload = ContactCreate(properties=properties)
         result = self._contacts_api.create(
@@ -99,6 +125,7 @@ class HubSpotClient:
             return existing
         return self.create_contact(properties)
 
+    @_retry_on_rate_limit
     def create_deal(
         self,
         properties: dict,
