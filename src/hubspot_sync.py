@@ -140,3 +140,16 @@ def sync_lead_to_hubspot(
     except Exception as exc:
         logger.exception("HubSpot sync failed for %s", email)
         return SyncResult(None, None, None, str(exc))
+
+
+def maybe_sync_lead(business: dict, lead_score_0_100: int) -> Optional[SyncResult]:
+    """Best-effort sync to HubSpot if HUBSPOT_SYNC_ENABLED=true. Returns
+    None when disabled, otherwise the SyncResult. Never raises.
+    """
+    if os.environ.get("HUBSPOT_SYNC_ENABLED", "false").lower() != "true":
+        return None
+    try:
+        return sync_lead_to_hubspot(business=business, lead_score_0_100=lead_score_0_100)
+    except Exception as exc:
+        logger.exception("maybe_sync_lead unexpected failure")
+        return SyncResult(None, None, None, str(exc))

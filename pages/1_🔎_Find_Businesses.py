@@ -309,6 +309,9 @@ if results:
                                 biz["id"], s["score"], s["tier"],
                                 all_emails=result.get("scraped_emails", []),
                             )
+                            # Best-effort push to HubSpot (no-op unless HUBSPOT_SYNC_ENABLED=true).
+                            from src.hubspot_sync import maybe_sync_lead
+                            maybe_sync_lead(updated, lead_score_0_100=s["score"])
                         email = result.get("primary_email") or "(no email)"
                         return True, f"✓ {biz['business_name']} → {email}"
                     except Exception as e:

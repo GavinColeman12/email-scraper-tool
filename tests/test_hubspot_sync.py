@@ -157,3 +157,28 @@ def test_normalize_score_to_1_10():
     assert normalize_score_to_1_10(100) == 10
     assert normalize_score_to_1_10(150) == 10  # clamp
     assert normalize_score_to_1_10(-10) == 1  # clamp
+
+
+def test_maybe_sync_lead_skips_when_flag_disabled(sample_business, monkeypatch):
+    """When HUBSPOT_SYNC_ENABLED is not 'true', maybe_sync_lead returns None."""
+    from src.hubspot_sync import maybe_sync_lead
+
+    monkeypatch.delenv("HUBSPOT_SYNC_ENABLED", raising=False)
+
+    result = maybe_sync_lead(sample_business, lead_score_0_100=50)
+    assert result is None
+
+
+def test_maybe_sync_lead_calls_sync_when_enabled(sample_business, monkeypatch):
+    """When HUBSPOT_SYNC_ENABLED=true, maybe_sync_lead invokes sync_lead_to_hubspot."""
+    from unittest.mock import patch
+    from src import hubspot_sync
+
+    monkeypatch.setenv("HUBSPOT_SYNC_ENABLED", "true")
+
+    expected = hubspot_sync.SyncResult("co-1", "c-1", "d-1", None)
+    with patch.object(hubspot_sync, "sync_lead_to_hubspot", return_value=expected) as mock:
+        result = hubspot_sync.maybe_sync_lead(sample_business, lead_score_0_100=50)
+
+    assert result == expected
+    mock.assert_called_once()
