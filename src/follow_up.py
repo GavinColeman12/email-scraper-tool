@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Optional
 
 
 def find_followup_candidates(

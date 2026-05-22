@@ -12,8 +12,6 @@ Pattern size bias:
 - 51-500 employees: flast@ peaks (42-45%)
 - 500+ employees: first.last@ dominates (48-56%)
 """
-from typing import List, Optional, Tuple
-
 
 # Default ordered priors per industry
 # Format: list of (pattern_name, prior_weight) where weight sums to 1.0
