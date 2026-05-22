@@ -28,7 +28,7 @@ from src.replay_explain import (
 from src.dashboard_queries import (
     search_metadata as _search_metadata_uncached,
 )
-from scripts.replay_search import run_replay, start_replay_async, REPLAY_MODES
+from scripts.replay_search import start_replay_async, REPLAY_MODES
 
 
 # ──────────────────────────────────────────────────────────────────────
