@@ -5,7 +5,7 @@ Output: exports/bootstrap_leads_<date>.csv with columns matching HubSpot's
 multi-object import format (Contacts + Companies).
 
 The actual `businesses` table schema (see src/storage.py) doesn't have
-cuisine_type / num_locations / source_batch columns. The script fills those
+industry / num_locations / source_batch columns. The script fills those
 custom HubSpot fields with sensible defaults — you can edit individual rows
 in the CSV before importing if you want to set them per-row.
 
@@ -122,7 +122,7 @@ def write_csv(leads: list[dict]) -> Path:
         "Phone Number",
         "City",
         "State/Region",
-        "Cuisine Type",
+        "Industry",
         "# of Locations",
         "Source / List Batch",
     ]
@@ -143,7 +143,7 @@ def write_csv(leads: list[dict]) -> Path:
                     "Phone Number": lead.get("phone") or "",
                     "City": city,
                     "State/Region": state,
-                    "Cuisine Type": "Other",  # No column in DB; edit CSV manually if needed
+                    "Industry": "Other",  # No column in DB; edit CSV manually if needed
                     "# of Locations": 1,       # Default; edit CSV manually if known
                     "Source / List Batch": f"pre-hubspot-search-{lead.get('search_id') or 'unknown'}",
                 }
