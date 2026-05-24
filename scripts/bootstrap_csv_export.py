@@ -249,9 +249,13 @@ def fetch_leads(conn, dialect: str) -> list[dict]:
             )
         """
 
+    # DISTINCT ON (primary_email) — pick the highest-tier copy of each
+    # email so the SAME business scraped from multiple searches doesn't
+    # appear as multiple CSV rows. HubSpot dedupes by email anyway, but
+    # this keeps the CSV clean and the preview row count meaningful.
     cur.execute(
         f"""
-        SELECT
+        SELECT DISTINCT ON (primary_email)
             business_name,
             website,
             primary_email,
@@ -273,7 +277,8 @@ def fetch_leads(conn, dialect: str) -> list[dict]:
         FROM businesses
         WHERE {where_clause}
         ORDER BY
-            CASE lead_tier WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END,
+            primary_email,
+            CASE lead_tier WHEN 'A' THEN 0 WHEN 'B' THEN 1 WHEN 'C' THEN 2 ELSE 3 END,
             id
         """
     )
