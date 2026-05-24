@@ -98,6 +98,42 @@ def test_sync_lead_maps_business_to_contact_properties(sample_business):
     assert props["lead_score"] == 7
 
 
+def test_sync_lead_classifies_vertical_from_business_type(sample_business):
+    """When `industry` isn't set, sync should classify business_vertical from business_type."""
+    # Remove the explicit industry, fall back to business_type
+    sample_business.pop("industry", None)
+    sample_business["business_type"] = "Pizza restaurant"
+
+    client = MagicMock()
+    client.upsert_company.return_value = "co-100"
+    client.upsert_contact.return_value = "c-200"
+    client.create_deal.return_value = "d-300"
+
+    sync_lead_to_hubspot(business=sample_business, lead_score_0_100=50, client=client)
+
+    company_call = client.upsert_company.call_args
+    # business_type='Pizza restaurant' should classify to 'Restaurant'
+    assert company_call.kwargs["properties"]["business_vertical"] == "Restaurant"
+
+
+def test_classify_vertical():
+    """Spot-check the _classify_vertical helper directly."""
+    from src.hubspot_sync import _classify_vertical
+
+    assert _classify_vertical("Pizza restaurant") == "Restaurant"
+    assert _classify_vertical("Coffee shop") == "Cafe / Bar / Brewery"
+    assert _classify_vertical("Boutique hotel") == "Hospitality (hotel, B&B)"
+    assert _classify_vertical("Law firm") == "Professional Services"
+    assert _classify_vertical("Dentist") == "Healthcare / Dental"
+    assert _classify_vertical("Solicitor") == "Professional Services"
+    assert _classify_vertical("Hair salon") == "Health & Wellness (salon, spa, gym)"
+    assert _classify_vertical("Real estate agency") == "Real Estate"
+    assert _classify_vertical("Plumber") == "Home Services"
+    assert _classify_vertical("Random unknown thing") == "Other"
+    assert _classify_vertical(None) == "Other"
+    assert _classify_vertical("") == "Other"
+
+
 def test_sync_lead_creates_deal_at_cold_outreach_stage(sample_business):
     client = MagicMock()
     client.upsert_company.return_value = "co-100"

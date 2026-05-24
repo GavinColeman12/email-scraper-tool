@@ -77,14 +77,15 @@ def _classify_vertical(business_type: str | None) -> str:
         return "Retail / E-commerce"
     if any(w in t for w in ("salon", "spa", "gym", "fitness", "yoga", "pilates", "barber", "nail")):
         return "Health & Wellness (salon, spa, gym)"
-    if any(w in t for w in ("law", "attorney", "lawyer", "esq", "consultant", "accountant", "cpa", "agency", "marketing", "advertising")):
-        return "Professional Services"
-    if any(w in t for w in ("plumber", "electrician", "contractor", "landscap", "roofing", "hvac", "construction", "remodel", "painter")):
-        return "Home Services"
+    # Specific verticals BEFORE generic Professional Services
+    if any(w in t for w in ("realtor", "real estate", "realty", "broker", "property management")):
+        return "Real Estate"
     if any(w in t for w in ("dentist", "dental", "doctor", "clinic", "medical", "physician", "dermatolog", "chiropract", "veterinarian", "vet ")):
         return "Healthcare / Dental"
-    if any(w in t for w in ("realtor", "real estate", "realty", "broker", "property")):
-        return "Real Estate"
+    if any(w in t for w in ("plumber", "electrician", "contractor", "landscap", "roofing", "hvac", "construction", "remodel", "painter")):
+        return "Home Services"
+    if any(w in t for w in ("law", "attorney", "lawyer", "esq", "consultant", "accountant", "cpa", "agency", "marketing", "advertising")):
+        return "Professional Services"
     return "Other"
 
 

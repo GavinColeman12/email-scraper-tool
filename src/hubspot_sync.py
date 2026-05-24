@@ -50,6 +50,39 @@ def _classify_role(title: Optional[str]) -> str:
     return "Other"
 
 
+def _classify_vertical(business_type: Optional[str]) -> str:
+    """Map the scraper's free-text business_type (from Google Maps) to one of
+    our 10 Business Vertical dropdown values. Best-effort; defaults to 'Other'.
+
+    Kept in sync with scripts/bootstrap_csv_export.py:_classify_vertical().
+    """
+    if not business_type:
+        return "Other"
+    t = business_type.lower()
+    if any(w in t for w in ("restaurant", "pizza", "diner", "eatery", "bistro", "grill", "steakhouse")):
+        return "Restaurant"
+    if any(w in t for w in ("cafe", "coffee", "bar", "brewery", "pub", "tavern", "lounge")):
+        return "Cafe / Bar / Brewery"
+    if any(w in t for w in ("hotel", "motel", "inn", "lodge", "b&b", "bed and breakfast", "hostel")):
+        return "Hospitality (hotel, B&B)"
+    if any(w in t for w in ("retail", "store", "shop", "boutique", "ecommerce", "e-commerce")):
+        return "Retail / E-commerce"
+    if any(w in t for w in ("salon", "spa", "gym", "fitness", "yoga", "pilates", "barber", "nail")):
+        return "Health & Wellness (salon, spa, gym)"
+    # Specific verticals BEFORE generic Professional Services
+    # (Professional Services includes "agency" which would otherwise swallow
+    # "real estate agency", "talent agency", etc.)
+    if any(w in t for w in ("realtor", "real estate", "realty", "broker", "property management")):
+        return "Real Estate"
+    if any(w in t for w in ("dentist", "dental", "doctor", "clinic", "medical", "physician", "dermatolog", "chiropract", "veterinarian", "vet ")):
+        return "Healthcare / Dental"
+    if any(w in t for w in ("plumber", "electrician", "contractor", "landscap", "roofing", "hvac", "construction", "remodel", "painter")):
+        return "Home Services"
+    if any(w in t for w in ("law", "attorney", "lawyer", "esq", "solicitor", "consultant", "accountant", "cpa", "agency", "marketing", "advertising")):
+        return "Professional Services"
+    return "Other"
+
+
 def _extract_domain(website: Optional[str]) -> Optional[str]:
     if not website:
         return None
@@ -90,7 +123,7 @@ def sync_lead_to_hubspot(
                 "domain": domain,
                 "city": business.get("city") or "",
                 "state": business.get("state") or "",
-                "business_vertical": business.get("industry") or business.get("business_type") or "Other",
+                "business_vertical": business.get("industry") or _classify_vertical(business.get("business_type")),
                 "of_locations": business.get("num_locations") or 1,
                 "source__list_batch": business.get("source_batch") or "manual",
                 "audit_url": business.get("audit_url") or "",
