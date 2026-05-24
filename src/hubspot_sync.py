@@ -91,6 +91,59 @@ def _extract_domain(website: Optional[str]) -> Optional[str]:
     return re.sub(r"^www\.", "", host) or None
 
 
+def _categorize_email_source(email_source: Optional[str]) -> str:
+    """Match the categorization used in scripts/bootstrap_csv_export.py."""
+    if not email_source:
+        return "Unknown"
+    src = email_source.lower()
+    if "scraped from website" in src:
+        return "Direct scrape"
+    if "industry prior" in src or ("pattern" in src and "triangulated" not in src):
+        return "Pattern"
+    if "triangulated" in src:
+        return "Triangulated"
+    if "cross-verified" in src:
+        return "Cross-verified"
+    if "rescued" in src:
+        return "Rescued"
+    return "Other"
+
+
+def _build_company_description(business: dict) -> str:
+    """Pack overflow data into a multi-line description for Company.description.
+
+    Includes: Lead Tier + Quality Score, Email Source detail, Google rating
+    + review count + Maps URL. Lines are prefix-stable for later parsing.
+    """
+    lines: list[str] = []
+
+    tier = business.get("lead_tier") or ""
+    score = business.get("lead_quality_score")
+    if tier or score is not None:
+        score_str = f"({score}/100)" if score is not None else ""
+        lines.append(f"Lead Quality: Tier {tier or '?'} {score_str}".strip())
+
+    email_src = business.get("email_source")
+    if email_src:
+        cat = _categorize_email_source(email_src)
+        lines.append(f"Email Source: {cat} — {email_src}")
+
+    rating = business.get("rating")
+    reviews = business.get("review_count")
+    maps_url = business.get("google_maps_url")
+    if rating or reviews or maps_url:
+        parts = []
+        if rating:
+            parts.append(f"{rating}★")
+        if reviews:
+            parts.append(f"{reviews} reviews")
+        if maps_url:
+            parts.append(maps_url)
+        lines.append("Google: " + " · ".join(parts))
+
+    return "\n".join(lines)
+
+
 def sync_lead_to_hubspot(
     business: dict,
     lead_score_0_100: int,
@@ -127,6 +180,7 @@ def sync_lead_to_hubspot(
                 "of_locations": business.get("num_locations") or 1,
                 "source__list_batch": business.get("source_batch") or "manual",
                 "audit_url": business.get("audit_url") or "",
+                "description": _build_company_description(business),
             },
         )
 

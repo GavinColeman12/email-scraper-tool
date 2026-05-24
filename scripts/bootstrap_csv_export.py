@@ -141,6 +141,42 @@ def _categorize_email_source(email_source: str | None) -> str:
     return "Other"
 
 
+def _build_description(lead: dict) -> str:
+    """Pack the data that doesn't fit in a custom property into a single
+    multi-line string for HubSpot's standard Company `description` field.
+
+    Output is human-readable AND machine-parseable (each line starts with
+    a stable prefix like 'Lead Quality:' / 'Google:').
+    """
+    lines: list[str] = []
+
+    tier = lead.get("lead_tier") or ""
+    score = lead.get("lead_quality_score")
+    if tier or score is not None:
+        score_str = f"({score}/100)" if score is not None else ""
+        lines.append(f"Lead Quality: Tier {tier or '?'} {score_str}".strip())
+
+    email_src = lead.get("email_source")
+    if email_src:
+        cat = _categorize_email_source(email_src)
+        lines.append(f"Email Source: {cat} — {email_src}")
+
+    rating = lead.get("rating")
+    reviews = lead.get("review_count")
+    maps_url = lead.get("google_maps_url")
+    if rating or reviews or maps_url:
+        parts = []
+        if rating:
+            parts.append(f"{rating}★")
+        if reviews:
+            parts.append(f"{reviews} reviews")
+        if maps_url:
+            parts.append(maps_url)
+        lines.append("Google: " + " · ".join(parts))
+
+    return "\n".join(lines)
+
+
 def _parse_location(address: str | None, location: str | None) -> tuple[str, str]:
     """Extract (city, state) from address/location strings — best-effort.
 
@@ -242,12 +278,8 @@ def write_csv(leads: list[dict]) -> Path:
         "Business Vertical",
         "# of Locations",
         "Source / List Batch",
-        "Lead Tier",
-        "Lead Quality Score",
         "Email Source Category",
-        "Google Rating",
-        "Google Review Count",
-        "Google Maps URL",
+        "Company Description",  # packed: tier + score + email source + Google
     ]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -270,12 +302,8 @@ def write_csv(leads: list[dict]) -> Path:
                     "Business Vertical": _classify_vertical(lead.get("business_type")),
                     "# of Locations": 1,       # Default; edit CSV manually if known
                     "Source / List Batch": f"pre-hubspot-search-{lead.get('search_id') or 'unknown'}",
-                    "Lead Tier": lead.get("lead_tier") or "",
-                    "Lead Quality Score": lead.get("lead_quality_score") or "",
                     "Email Source Category": _categorize_email_source(lead.get("email_source")),
-                    "Google Rating": lead.get("rating") or "",
-                    "Google Review Count": lead.get("review_count") or "",
-                    "Google Maps URL": lead.get("google_maps_url") or "",
+                    "Company Description": _build_description(lead),
                 }
             )
     return out_path
