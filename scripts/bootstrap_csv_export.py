@@ -60,6 +60,34 @@ def _split_name(full: str | None) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
+def _classify_vertical(business_type: str | None) -> str:
+    """Map the scraper's free-text business_type (from Google Maps) to one of
+    our 10 Business Vertical dropdown values. Best-effort; defaults to 'Other'.
+    """
+    if not business_type:
+        return "Other"
+    t = business_type.lower()
+    if any(w in t for w in ("restaurant", "pizza", "diner", "eatery", "bistro", "grill", "steakhouse")):
+        return "Restaurant"
+    if any(w in t for w in ("cafe", "coffee", "bar", "brewery", "pub", "tavern", "lounge")):
+        return "Cafe / Bar / Brewery"
+    if any(w in t for w in ("hotel", "motel", "inn", "lodge", "b&b", "bed and breakfast", "hostel")):
+        return "Hospitality (hotel, B&B)"
+    if any(w in t for w in ("retail", "store", "shop", "boutique", "ecommerce", "e-commerce")):
+        return "Retail / E-commerce"
+    if any(w in t for w in ("salon", "spa", "gym", "fitness", "yoga", "pilates", "barber", "nail")):
+        return "Health & Wellness (salon, spa, gym)"
+    if any(w in t for w in ("law", "attorney", "lawyer", "esq", "consultant", "accountant", "cpa", "agency", "marketing", "advertising")):
+        return "Professional Services"
+    if any(w in t for w in ("plumber", "electrician", "contractor", "landscap", "roofing", "hvac", "construction", "remodel", "painter")):
+        return "Home Services"
+    if any(w in t for w in ("dentist", "dental", "doctor", "clinic", "medical", "physician", "dermatolog", "chiropract", "veterinarian", "vet ")):
+        return "Healthcare / Dental"
+    if any(w in t for w in ("realtor", "real estate", "realty", "broker", "property")):
+        return "Real Estate"
+    return "Other"
+
+
 def _parse_location(address: str | None, location: str | None) -> tuple[str, str]:
     """Extract (city, state) from address/location strings — best-effort.
 
@@ -84,9 +112,34 @@ def _parse_location(address: str | None, location: str | None) -> tuple[str, str
 
 
 def fetch_leads(conn, dialect: str) -> list[dict]:
+    """Pull the 'best cohort' of leads worth importing into HubSpot Free.
+
+    Filter (matches Gavin's mental model: high quality + confirmed email +
+    confirmed decision maker):
+      - lead_tier IN ('A', 'B')
+      - confidence IN ('high', 'very_high', 'confirmed', 'verified')
+      - contact_title matches owner/founder/CEO/president/principal/partner
+
+    This narrows ~2,400 raw eligible leads down to ~300 — well under
+    HubSpot Free's 1,000 contact cap, with headroom for new leads.
+
+    To override (export everyone), set env var BOOTSTRAP_FILTER=off.
+    """
     cur = conn.cursor()
-    cur.execute(
+    filter_mode = os.environ.get("BOOTSTRAP_FILTER", "best").lower()
+
+    if filter_mode == "off":
+        where_clause = "primary_email IS NOT NULL AND primary_email != ''"
+    else:
+        where_clause = """
+            primary_email IS NOT NULL AND primary_email != ''
+            AND lead_tier IN ('A', 'B')
+            AND LOWER(COALESCE(confidence, '')) IN ('high', 'very_high', 'confirmed', 'verified')
+            AND LOWER(COALESCE(contact_title, '')) ~ '(owner|founder|ceo|president|principal|partner)'
         """
+
+    cur.execute(
+        f"""
         SELECT
             business_name,
             website,
@@ -96,11 +149,15 @@ def fetch_leads(conn, dialect: str) -> list[dict]:
             phone,
             address,
             location,
-            search_id
+            search_id,
+            business_type,
+            lead_tier,
+            confidence
         FROM businesses
-        WHERE primary_email IS NOT NULL
-          AND primary_email != ''
-        ORDER BY id
+        WHERE {where_clause}
+        ORDER BY
+            CASE lead_tier WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END,
+            id
         """
     )
     rows = cur.fetchall()
@@ -122,7 +179,7 @@ def write_csv(leads: list[dict]) -> Path:
         "Phone Number",
         "City",
         "State/Region",
-        "Industry",
+        "Business Vertical",
         "# of Locations",
         "Source / List Batch",
     ]
@@ -143,7 +200,7 @@ def write_csv(leads: list[dict]) -> Path:
                     "Phone Number": lead.get("phone") or "",
                     "City": city,
                     "State/Region": state,
-                    "Industry": "Other",  # No column in DB; edit CSV manually if needed
+                    "Business Vertical": _classify_vertical(lead.get("business_type")),
                     "# of Locations": 1,       # Default; edit CSV manually if known
                     "Source / List Batch": f"pre-hubspot-search-{lead.get('search_id') or 'unknown'}",
                 }
