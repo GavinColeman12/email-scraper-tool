@@ -90,7 +90,7 @@ def sync_lead_to_hubspot(
                 "domain": domain,
                 "city": business.get("city") or "",
                 "state": business.get("state") or "",
-                "industry": business.get("industry") or business.get("business_type") or "Other",
+                "business_vertical": business.get("industry") or business.get("business_type") or "Other",
                 "of_locations": business.get("num_locations") or 1,
                 "source__list_batch": business.get("source_batch") or "manual",
                 "audit_url": business.get("audit_url") or "",

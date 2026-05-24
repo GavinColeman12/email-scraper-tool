@@ -70,7 +70,7 @@ def test_sync_lead_maps_business_to_company_properties(sample_business):
     props = company_call.kwargs["properties"]
     assert props["name"] == "Joe's Pizza"
     assert props["domain"] == "joespizza.com"
-    assert props["industry"] == "Restaurant"
+    assert props["business_vertical"] == "Restaurant"
     assert props["of_locations"] == 3
     assert props["source__list_batch"] == "brooklyn-pizza-2026-05"
     assert props["audit_url"] == "https://audits.example.com/joes-pizza"
