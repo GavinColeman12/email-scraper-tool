@@ -138,9 +138,22 @@ if scraped_no_email:
         pending = not_scraped + scraped_no_email
 
 # ── Check active job for this search ──
+# NOTE: this whitelist must mirror the `job_type` map in the start
+# button below (line ~369). Volume + triangulation were added later
+# and silently dropped from the in-page running-job UI for months
+# (job DOES complete in the background, but the page never re-renders
+# with progress, never enables the Cancel button, never polls for
+# completion — so to the operator the job "appears stuck"). Keep
+# all five job_types in sync going forward.
 active = [
     j for j in background_jobs.list_active()
-    if j.get("job_type") in ("bulk_scrape", "bulk_deep_scrape", "bulk_verified_scrape")
+    if j.get("job_type") in (
+        "bulk_scrape",
+        "bulk_deep_scrape",
+        "bulk_verified_scrape",
+        "bulk_volume_scrape",
+        "bulk_triangulation_scrape",
+    )
     and j.get("search_id") == search_id
 ]
 running_job = active[0] if active else None
@@ -356,6 +369,9 @@ def _scrape_worker(biz, job_id):
                 biz["id"], score["score"], score["tier"],
                 all_emails=result.get("scraped_emails", []),
             )
+            # Best-effort HubSpot sync (no-op unless HUBSPOT_SYNC_ENABLED=true).
+            from src.hubspot_sync import maybe_sync_lead
+            maybe_sync_lead(updated, lead_score_0_100=score["score"])
 
         email = result.get("primary_email", "") or "(no email)"
         conf = result.get("confidence", "")
