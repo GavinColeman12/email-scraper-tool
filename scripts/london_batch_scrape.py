@@ -33,7 +33,9 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 from dotenv import load_dotenv
 
@@ -79,6 +81,10 @@ LOCATION = "London, UK"
 MAX_RESULTS_PER_VERTICAL = int(os.environ.get("VERTICAL_MAX_RESULTS", "50"))
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 PER_VERTICAL_BUDGET = float(os.environ.get("PER_VERTICAL_BUDGET", "25.0"))
+PARALLEL_WORKERS = int(os.environ.get("PARALLEL_WORKERS", "10"))
+
+# Global counter mutex so concurrent worker logs don't interleave numbers
+_progress_lock = Lock()
 
 
 def scrape_one_vertical(vertical: str) -> dict:
@@ -113,15 +119,21 @@ def scrape_one_vertical(vertical: str) -> dict:
         log.info("[DRY_RUN] Skipping volume scrape.")
         return {"vertical": vertical, "searched": len(results), "scraped": 0, "errored": 0}
 
-    # Step 3: Volume scrape each business
+    # Step 3: Volume scrape each business — IN PARALLEL with N workers
+    # (matches the existing Bulk Scrape Streamlit page's behavior)
     reset_run_budget(PER_VERTICAL_BUDGET)
     businesses = storage.list_businesses(search_id=search_id)
     businesses = [b for b in businesses if b.get("website")]
-    log.info("Volume-scraping %d businesses with websites...", len(businesses))
+    total = len(businesses)
+    log.info("Volume-scraping %d businesses with %d parallel workers...",
+             total, PARALLEL_WORKERS)
 
+    completed = {"count": 0}
     scraped = 0
     errored = 0
-    for i, biz in enumerate(businesses, 1):
+
+    def _worker(biz):
+        """Run volume scrape + score for one business. Returns (ok, name)."""
         name = biz.get("business_name", "?")[:40]
         try:
             vres = scrape_volume(
@@ -144,14 +156,26 @@ def scrape_one_vertical(vertical: str) -> dict:
                     all_emails=result.get("scraped_emails", []),
                 )
                 email = result.get("primary_email") or "(no email)"
-                log.info("  [%d/%d] %s → %s  tier=%s",
-                         i, len(businesses), name, email, s["tier"])
-            scraped += 1
+                with _progress_lock:
+                    completed["count"] += 1
+                    log.info("  [%d/%d] %s → %s  tier=%s",
+                             completed["count"], total, name, email, s["tier"])
+            return True, name
         except Exception as exc:
-            errored += 1
-            log.warning("  [%d/%d] %s — ERROR: %s", i, len(businesses), name, exc)
-        # Light throttle so we don't hammer external APIs
-        time.sleep(0.5)
+            with _progress_lock:
+                completed["count"] += 1
+                log.warning("  [%d/%d] %s — ERROR: %s",
+                            completed["count"], total, name, exc)
+            return False, name
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
+        futures = [pool.submit(_worker, biz) for biz in businesses]
+        for fut in as_completed(futures):
+            ok, _name = fut.result()
+            if ok:
+                scraped += 1
+            else:
+                errored += 1
 
     return {"vertical": vertical, "searched": len(results), "scraped": scraped, "errored": errored}
 
@@ -165,6 +189,7 @@ def main() -> int:
     log.info("  Verticals: %d", len(VERTICALS))
     log.info("  Max per vertical: %d", MAX_RESULTS_PER_VERTICAL)
     log.info("  Budget per vertical: $%.2f", PER_VERTICAL_BUDGET)
+    log.info("  Parallel workers per vertical: %d", PARALLEL_WORKERS)
     log.info("  Dry run: %s", DRY_RUN)
     log.info("")
 
