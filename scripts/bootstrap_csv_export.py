@@ -174,7 +174,9 @@ def _build_description(lead: dict) -> str:
             parts.append(maps_url)
         lines.append("Google: " + " · ".join(parts))
 
-    return "\n".join(lines)
+    # Single-line with ' | ' separator so CSV parsers (HubSpot's especially)
+    # don't miscount the row when there are embedded newlines.
+    return " | ".join(lines)
 
 
 def _parse_location(address: str | None, location: str | None) -> tuple[str, str]:

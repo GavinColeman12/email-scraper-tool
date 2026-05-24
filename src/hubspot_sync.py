@@ -141,7 +141,10 @@ def _build_company_description(business: dict) -> str:
             parts.append(maps_url)
         lines.append("Google: " + " · ".join(parts))
 
-    return "\n".join(lines)
+    # Single-line with ' | ' separator — newlines in CSV-imported fields
+    # can confuse parsers, and the live sync mirrors the bootstrap format
+    # so both code paths produce identical description strings.
+    return " | ".join(lines)
 
 
 def sync_lead_to_hubspot(
