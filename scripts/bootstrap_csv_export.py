@@ -203,30 +203,50 @@ def _parse_location(address: str | None, location: str | None) -> tuple[str, str
 
 
 def fetch_leads(conn, dialect: str) -> list[dict]:
-    """Pull the 'best cohort' of leads worth importing into HubSpot Free.
+    """Pull the leads worth importing into HubSpot Free.
 
-    Filter (matches Gavin's mental model: high quality + confirmed email +
-    confirmed decision maker):
-      - lead_tier IN ('A', 'B')
-      - confidence IN ('high', 'very_high', 'confirmed', 'verified')
-      - contact_title matches owner/founder/CEO/president/principal/partner
+    Default filter (BOOTSTRAP_FILTER=best, default) — "strict OR LinkedIn":
+      Must have decision-maker title AND email, then EITHER:
+        (a) rigorous email proof: tier A/B + high/verified confidence, OR
+        (b) LinkedIn-confirmed: professional_ids contains a LinkedIn URL
+      Either path validates we have the right person + a real email.
 
-    This narrows ~2,400 raw eligible leads down to ~300 — well under
-    HubSpot Free's 1,000 contact cap, with headroom for new leads.
+    Yields ~629 leads from ~2,400 raw eligible. Well under HubSpot Free's
+    1,000 contact cap.
 
-    To override (export everyone), set env var BOOTSTRAP_FILTER=off.
+    Other modes:
+      BOOTSTRAP_FILTER=strict  — original A/B + high + dm title (~311 leads)
+      BOOTSTRAP_FILTER=linkedin — LinkedIn + dm title, no tier limit (~380)
+      BOOTSTRAP_FILTER=off     — export everyone with primary_email (~2,400)
     """
     cur = conn.cursor()
     filter_mode = os.environ.get("BOOTSTRAP_FILTER", "best").lower()
 
     if filter_mode == "off":
         where_clause = "primary_email IS NOT NULL AND primary_email != ''"
-    else:
+    elif filter_mode == "strict":
         where_clause = """
             primary_email IS NOT NULL AND primary_email != ''
             AND lead_tier IN ('A', 'B')
             AND LOWER(COALESCE(confidence, '')) IN ('high', 'very_high', 'confirmed', 'verified')
             AND LOWER(COALESCE(contact_title, '')) ~ '(owner|founder|ceo|president|principal|partner)'
+        """
+    elif filter_mode == "linkedin":
+        where_clause = """
+            primary_email IS NOT NULL AND primary_email != ''
+            AND LOWER(COALESCE(contact_title, '')) ~ '(owner|founder|ceo|president|principal|partner)'
+            AND professional_ids::text ILIKE '%linkedin.com%'
+        """
+    else:
+        # Default "best" mode — strict OR LinkedIn
+        where_clause = """
+            primary_email IS NOT NULL AND primary_email != ''
+            AND LOWER(COALESCE(contact_title, '')) ~ '(owner|founder|ceo|president|principal|partner)'
+            AND (
+                professional_ids::text ILIKE '%linkedin.com%'
+                OR (lead_tier IN ('A', 'B')
+                    AND LOWER(COALESCE(confidence, '')) IN ('high', 'very_high', 'confirmed', 'verified'))
+            )
         """
 
     cur.execute(
