@@ -89,6 +89,58 @@ def _classify_vertical(business_type: str | None) -> str:
     return "Other"
 
 
+def _extract_linkedin_url(professional_ids) -> str:
+    """Pull a LinkedIn URL out of the professional_ids JSON column if present.
+
+    The scraper stores the decision-maker's source URL in
+    professional_ids.decision_maker.source_url. When source = 'linkedin_via_google',
+    that URL is the person's LinkedIn profile.
+    """
+    import json
+    if not professional_ids:
+        return ""
+    try:
+        data = json.loads(professional_ids) if isinstance(professional_ids, str) else professional_ids
+        dm = data.get("decision_maker") or {}
+        src = (dm.get("source") or "").lower()
+        url = dm.get("source_url") or ""
+        if "linkedin.com" in url.lower():
+            return url
+        # Sometimes it's nested in all_providers
+        for prov in data.get("all_providers") or []:
+            u = prov.get("source_url") or ""
+            if "linkedin.com" in u.lower():
+                return u
+    except Exception:
+        pass
+    return ""
+
+
+def _categorize_email_source(email_source: str | None) -> str:
+    """Bucket the verbose email_source string into 3 sales-useful categories.
+
+    Direct scrape  = email was literally found on the company's website
+                     (highest confidence — definitely real)
+    Pattern        = email was constructed from a known industry pattern
+                     ({first}.{last}, etc.) and NeverBounce-verified valid
+    Triangulated   = constructed from multiple evidence sources and verified
+    """
+    if not email_source:
+        return "Unknown"
+    src = email_source.lower()
+    if "scraped from website" in src:
+        return "Direct scrape"
+    if "industry prior" in src or "pattern" in src and "triangulated" not in src:
+        return "Pattern"
+    if "triangulated" in src:
+        return "Triangulated"
+    if "cross-verified" in src:
+        return "Cross-verified"
+    if "rescued" in src:
+        return "Rescued"
+    return "Other"
+
+
 def _parse_location(address: str | None, location: str | None) -> tuple[str, str]:
     """Extract (city, state) from address/location strings — best-effort.
 
@@ -153,7 +205,13 @@ def fetch_leads(conn, dialect: str) -> list[dict]:
             search_id,
             business_type,
             lead_tier,
-            confidence
+            confidence,
+            email_source,
+            rating,
+            review_count,
+            google_maps_url,
+            lead_quality_score,
+            professional_ids
         FROM businesses
         WHERE {where_clause}
         ORDER BY
@@ -178,11 +236,18 @@ def write_csv(leads: list[dict]) -> Path:
         "Last Name",
         "Job Title",
         "Phone Number",
+        "LinkedIn URL",
         "City",
         "State/Region",
         "Business Vertical",
         "# of Locations",
         "Source / List Batch",
+        "Lead Tier",
+        "Lead Quality Score",
+        "Email Source Category",
+        "Google Rating",
+        "Google Review Count",
+        "Google Maps URL",
     ]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -199,11 +264,18 @@ def write_csv(leads: list[dict]) -> Path:
                     "Last Name": last,
                     "Job Title": lead.get("contact_title") or "",
                     "Phone Number": lead.get("phone") or "",
+                    "LinkedIn URL": _extract_linkedin_url(lead.get("professional_ids")),
                     "City": city,
                     "State/Region": state,
                     "Business Vertical": _classify_vertical(lead.get("business_type")),
                     "# of Locations": 1,       # Default; edit CSV manually if known
                     "Source / List Batch": f"pre-hubspot-search-{lead.get('search_id') or 'unknown'}",
+                    "Lead Tier": lead.get("lead_tier") or "",
+                    "Lead Quality Score": lead.get("lead_quality_score") or "",
+                    "Email Source Category": _categorize_email_source(lead.get("email_source")),
+                    "Google Rating": lead.get("rating") or "",
+                    "Google Review Count": lead.get("review_count") or "",
+                    "Google Maps URL": lead.get("google_maps_url") or "",
                 }
             )
     return out_path
