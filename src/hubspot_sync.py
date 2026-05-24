@@ -91,6 +91,31 @@ def _extract_domain(website: Optional[str]) -> Optional[str]:
     return re.sub(r"^www\.", "", host) or None
 
 
+def _split_name(full: Optional[str]) -> tuple[str, str]:
+    """Split 'First Last' into ('First', 'Last'). Empty when missing."""
+    if not full:
+        return "", ""
+    parts = full.strip().split(maxsplit=1)
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1]
+
+
+def _parse_city_state(address: Optional[str], location: Optional[str]) -> tuple[str, str]:
+    """Best-effort city/state extraction from address strings."""
+    src = (address or location or "").strip()
+    if not src:
+        return "", ""
+    parts = [p.strip() for p in src.split(",")]
+    if len(parts) >= 3:
+        city = parts[-2]
+        state_zip = parts[-1].split()
+        return city, (state_zip[0] if state_zip else "")
+    if len(parts) == 2:
+        return parts[0], parts[1].split()[0] if parts[1] else ""
+    return parts[0], ""
+
+
 def _categorize_email_source(email_source: Optional[str]) -> str:
     """Match the categorization used in scripts/bootstrap_csv_export.py."""
     if not email_source:
@@ -167,9 +192,25 @@ def sync_lead_to_hubspot(
     if not domain:
         return SyncResult(None, None, None, "Missing or unparseable website")
 
-    email = business.get("picked_email")
+    # Support both the Neon column names (primary_email, contact_title)
+    # AND legacy/test-fixture names (picked_email, picked_title)
+    email = business.get("primary_email") or business.get("picked_email")
     if not email:
-        return SyncResult(None, None, None, "Missing picked_email")
+        return SyncResult(None, None, None, "Missing email (primary_email/picked_email)")
+
+    title = business.get("contact_title") or business.get("picked_title") or ""
+
+    # Name: Neon stores full name in contact_name; split it
+    fn = business.get("picked_first_name")
+    ln = business.get("picked_last_name")
+    if not fn and not ln:
+        fn, ln = _split_name(business.get("contact_name"))
+
+    # City/State: Neon parses out of address/location
+    city = business.get("city")
+    state = business.get("state")
+    if not city and not state:
+        city, state = _parse_city_state(business.get("address"), business.get("location"))
 
     try:
         company_id = client.upsert_company(
@@ -177,11 +218,11 @@ def sync_lead_to_hubspot(
             properties={
                 "name": business.get("business_name") or domain,
                 "domain": domain,
-                "city": business.get("city") or "",
-                "state": business.get("state") or "",
+                "city": city or "",
+                "state": state or "",
                 "business_vertical": business.get("industry") or _classify_vertical(business.get("business_type")),
                 "of_locations": business.get("num_locations") or 1,
-                "source__list_batch": business.get("source_batch") or "manual",
+                "source__list_batch": business.get("source_batch") or f"search-{business.get('search_id') or 'unknown'}",
                 "audit_url": business.get("audit_url") or "",
                 "description": _build_company_description(business),
             },
@@ -191,11 +232,11 @@ def sync_lead_to_hubspot(
             email=email,
             properties={
                 "email": email,
-                "firstname": business.get("picked_first_name") or "",
-                "lastname": business.get("picked_last_name") or "",
-                "jobtitle": business.get("picked_title") or "",
+                "firstname": fn or "",
+                "lastname": ln or "",
+                "jobtitle": title,
                 "phone": business.get("phone") or "",
-                "role": _classify_role(business.get("picked_title")),
+                "role": _classify_role(title),
                 "lead_score": normalize_score_to_1_10(lead_score_0_100),
             },
         )
