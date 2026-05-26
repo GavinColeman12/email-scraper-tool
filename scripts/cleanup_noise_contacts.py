@@ -145,6 +145,13 @@ def is_whitelisted(email: str) -> bool:
 
 def main() -> int:
     apply_changes = os.environ.get("CLEANUP_APPLY") == "1"
+    # CLEANUP_MODE:
+    #   conservative (default) — delete only OBVIOUS noise (HubSpot system,
+    #     Stripe receipts, no-reply, etc.). Spare business-looking emails.
+    #   aggressive — delete everything NOT in Neon's scraped cohort and not
+    #     whitelisted. Anything you wouldn't want flooding HubSpot.
+    mode = os.environ.get("CLEANUP_MODE", "conservative").lower()
+    print(f"Mode: {mode.upper()}")
 
     print("Loading data...")
     neon = neon_emails()
@@ -173,6 +180,9 @@ def main() -> int:
         elif email in neon:
             keep_neon.append(c)
         elif is_noise(email):
+            delete.append(c)
+        elif mode == "aggressive":
+            # Aggressive: anything not in Neon and not whitelisted is noise
             delete.append(c)
         else:
             keep_business_looking.append(c)
