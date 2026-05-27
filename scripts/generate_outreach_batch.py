@@ -72,26 +72,34 @@ def fetch_list_members(list_id: str) -> list[dict]:
 
     # Hydrate with contact + company properties
     contact_ids = [m.get("recordId") for m in members][:LIMIT]
+
+    # Step 1: contact properties
     body = {
         "inputs": [{"id": cid} for cid in contact_ids],
         "properties": [
             "email", "firstname", "lastname", "jobtitle", "phone",
             "hs_linkedin_url", "city", "state",
             "email_source_category", "lead_quality_score_raw",
-            "associatedcompanyid",
         ],
-        "associations": ["companies"],
     }
     r = requests.post("https://api.hubapi.com/crm/v3/objects/contacts/batch/read",
                       headers=HEADERS, json=body, timeout=30)
     contacts = r.json().get("results", [])
 
-    # Pull company info for each contact's associated company
-    company_ids = set()
-    for c in contacts:
-        for assoc in (c.get("associations", {}).get("companies", {}).get("results") or []):
-            company_ids.add(assoc["id"])
+    # Step 2: contact→company associations via v4 batch endpoint
+    body = {"inputs": [{"id": cid} for cid in contact_ids]}
+    r = requests.post("https://api.hubapi.com/crm/v4/associations/contacts/companies/batch/read",
+                      headers=HEADERS, json=body, timeout=30)
+    assoc_results = r.json().get("results", [])
+    contact_to_company = {}
+    for ar in assoc_results:
+        from_id = ar.get("from", {}).get("id")
+        to_list = ar.get("to") or []
+        if from_id and to_list:
+            contact_to_company[from_id] = to_list[0].get("toObjectId")
 
+    # Step 3: fetch company properties for all referenced companies
+    company_ids = set(contact_to_company.values())
     companies = {}
     if company_ids:
         body = {
@@ -103,13 +111,10 @@ def fetch_list_members(list_id: str) -> list[dict]:
         for co in r.json().get("results", []):
             companies[co["id"]] = co["properties"]
 
-    # Attach company to each contact
+    # Step 4: attach company data to each contact
     for c in contacts:
-        assoc = c.get("associations", {}).get("companies", {}).get("results") or []
-        if assoc:
-            c["_company"] = companies.get(assoc[0]["id"], {})
-        else:
-            c["_company"] = {}
+        company_id = contact_to_company.get(c["id"])
+        c["_company"] = companies.get(str(company_id), {}) if company_id else {}
 
     return contacts
 
