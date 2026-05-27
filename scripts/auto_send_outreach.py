@@ -65,9 +65,24 @@ LIST_ID = os.environ.get("HUBSPOT_LIST_ID", "17")
 LIMIT = int(os.environ.get("LIMIT", "25"))
 DELAY_SEC = int(os.environ.get("DELAY_SEC", "60"))
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"
-REPLY_TO = os.environ.get("REPLY_TO", "jo.webber@crescendo-consulting.net")
 BCC_HUBSPOT = os.environ.get("BCC_HUBSPOT", "246276084@bcc.na2.hubspot.com")
 HARD_STOP_ON_ERROR = os.environ.get("HARD_STOP_ON_ERROR", "1") == "1"
+
+# Sender identity — gavin (default), joanna, or custom via env
+SENDER = os.environ.get("SENDER", "gavin").lower()
+SENDERS = {
+    "gavin": {
+        "name": "Gavin Coleman",
+        "signature": "Gavin Coleman\nCrescendo Consulting",
+        "reply_to": os.environ.get("REPLY_TO", ""),  # default: use FROM (Gmail account)
+    },
+    "joanna": {
+        "name": "Joanna Webber",
+        "signature": "Joanna Webber\nCrescendo Consulting",
+        "reply_to": os.environ.get("REPLY_TO", "jo.webber@crescendo-consulting.net"),
+    },
+}
+SENDER_CONFIG = SENDERS.get(SENDER, SENDERS["gavin"])
 
 PLATFORM_URL = "https://crescendo-platform.crescendo-consulting.net/explore"
 
@@ -160,8 +175,7 @@ Run it on a real business in your industry and see for yourself:
 
 Want one for {company_name}? Just reply.
 
-Joanna Webber
-Crescendo Consulting"""
+{SENDER_CONFIG['signature']}"""
     return {"subject": subject, "body": body, "to": p.get("email") or ""}
 
 
@@ -172,7 +186,8 @@ def send_via_gmail(service, to: str, subject: str, body: str) -> str:
     msg = MIMEText(body, "plain", "utf-8")
     msg["To"] = to
     msg["Subject"] = subject
-    msg["Reply-To"] = REPLY_TO
+    if SENDER_CONFIG.get("reply_to"):
+        msg["Reply-To"] = SENDER_CONFIG["reply_to"]
     msg["Bcc"] = BCC_HUBSPOT
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
@@ -191,8 +206,12 @@ def main() -> int:
     mode = "🟢 LIVE SEND" if not DRY_RUN else "🟡 DRY RUN (no emails sent)"
     log.info("=" * 60)
     log.info(f"Mode: {mode}")
-    log.info(f"List: {LIST_ID}  Limit: {LIMIT}  Delay between sends: {DELAY_SEC}s")
-    log.info(f"Reply-To: {REPLY_TO}")
+    log.info(f"Sender: {SENDER_CONFIG['name']} ({SENDER})")
+    log.info(f"List: {LIST_ID}  Limit: {LIMIT}  Delay: {DELAY_SEC}s")
+    if SENDER_CONFIG.get("reply_to"):
+        log.info(f"Reply-To: {SENDER_CONFIG['reply_to']}")
+    else:
+        log.info(f"Reply-To: (none — replies go to your Gmail)")
     log.info(f"BCC: {BCC_HUBSPOT} (HubSpot auto-log)")
     log.info("=" * 60)
 
