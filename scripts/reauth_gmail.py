@@ -37,17 +37,17 @@ TOKEN_FILE = CREDS_DIR / "token.json"
 
 
 def main() -> int:
-    if not CLIENT_SECRET.exists():
-        # Try the V2 directory as fallback
+    # Resolve credential paths — try primary, fall back to V2
+    client_secret = CLIENT_SECRET
+    token_file = TOKEN_FILE
+    if not client_secret.exists():
         alt = REPO_ROOT.parent / "reputation-audit-tool-V2" / "credentials" / "client_secret.json"
         if alt.exists():
             print(f"Using fallback credentials at {alt.parent}")
-            global CLIENT_SECRET, TOKEN_FILE, CREDS_DIR
-            CREDS_DIR = alt.parent
-            CLIENT_SECRET = alt
-            TOKEN_FILE = alt.parent / "token.json"
+            client_secret = alt
+            token_file = alt.parent / "token.json"
         else:
-            print(f"❌ Can't find client_secret.json at {CLIENT_SECRET}")
+            print(f"❌ Can't find client_secret.json at {client_secret}")
             print(f"   Also checked: {alt}")
             print(f"   Make sure your OAuth client config exists in the credentials/ dir.")
             return 1
@@ -59,21 +59,21 @@ def main() -> int:
         print("   pip install google-auth-oauthlib")
         return 1
 
-    print(f"Using client config: {CLIENT_SECRET}")
-    print(f"Will save token to: {TOKEN_FILE}")
+    print(f"Using client config: {client_secret}")
+    print(f"Will save token to: {token_file}")
     print()
     print("Opening browser for Google sign-in...")
     print("Sign in with the Google account you want to SEND emails as.")
     print()
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET), SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), SCOPES)
     creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
 
     # Save token
-    with TOKEN_FILE.open("w") as f:
+    with token_file.open("w") as f:
         f.write(creds.to_json())
 
-    print(f"\n✅ Token saved to {TOKEN_FILE}")
+    print(f"\n✅ Token saved to {token_file}")
     print(f"   Refresh token included: {'yes' if creds.refresh_token else 'NO — re-run with access_type=offline'}")
     print()
 
