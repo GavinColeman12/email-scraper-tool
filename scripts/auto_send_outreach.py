@@ -45,6 +45,7 @@ import sys
 import time
 from datetime import date, datetime
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
 from pathlib import Path
 
@@ -89,6 +90,13 @@ SENDERS = {
 SENDER_CONFIG = SENDERS.get(SENDER, SENDERS["gavin"])
 
 PLATFORM_URL = "https://crescendo-platform.crescendo-consulting.net/explore"
+
+# Signature links — edit these (LINKEDIN_URL especially — drop your real profile)
+WEBSITE_URL = os.environ.get("WEBSITE_URL", "https://crescendo-consulting.net")
+LINKEDIN_URL = os.environ.get("LINKEDIN_URL", "")  # set to your LinkedIn profile URL
+DEMO_URL = os.environ.get("DEMO_URL", PLATFORM_URL)
+SIG_NAME = "Gavin Coleman"
+SIG_TITLE = "Founder & Principal Consultant, Crescendo Consulting"
 
 LOG_DIR = Path(__file__).resolve().parent.parent / "exports"
 LOG_DIR.mkdir(exist_ok=True)
@@ -172,6 +180,27 @@ VERTICAL_PHRASE = {
 }
 
 
+def _signature_text() -> str:
+    links = [f"Website: {WEBSITE_URL}"]
+    if LINKEDIN_URL:
+        links.append(f"LinkedIn: {LINKEDIN_URL}")
+    links.append(f"See a live demo: {DEMO_URL}")
+    return f"Best,\n{SIG_NAME}\n{SIG_TITLE}\n\n" + "  |  ".join(links)
+
+
+def _signature_html() -> str:
+    link_parts = [f'<a href="{WEBSITE_URL}">Website</a>']
+    if LINKEDIN_URL:
+        link_parts.append(f'<a href="{LINKEDIN_URL}">LinkedIn</a>')
+    link_parts.append(f'<a href="{DEMO_URL}">See a live demo</a>')
+    links_html = ' &nbsp;|&nbsp; '.join(link_parts)
+    return (
+        f'<p style="margin:16px 0 0 0">Best,<br>{SIG_NAME}<br>'
+        f'<i>{SIG_TITLE}</i></p>'
+        f'<p style="margin:8px 0 0 0">{links_html}</p>'
+    )
+
+
 def compose_email(contact: dict) -> dict:
     p = contact["properties"]
     co = contact["_company"]
@@ -181,7 +210,9 @@ def compose_email(contact: dict) -> dict:
     phrase = VERTICAL_PHRASE.get(vertical, "businesses")
 
     subject = f"A diagnostic on {company_name}"
-    body = f"""Hi {first},
+
+    # Plain-text version
+    body_text = f"""Hi {first},
 
 We're ex-Big 4 consultants and we built a platform that does the diagnostic work we used to charge a fortune for. For {phrase} like yours, we routinely find north of $100K in combined risk and opportunity.
 
@@ -196,23 +227,43 @@ Run it on a real business in your industry and see for yourself:
 
 Want one for {company_name}? Just reply.
 
-{SENDER_CONFIG['signature']}"""
-    return {"subject": subject, "body": body, "to": p.get("email") or ""}
+{_signature_text()}"""
+
+    # HTML version (lightweight — no images/logos to avoid spam flags)
+    body_html = f"""<div style="font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#222">
+<p>Hi {first},</p>
+<p>We're ex-Big 4 consultants and we built a platform that does the diagnostic work we used to charge a fortune for. For {phrase} like yours, we routinely find north of $100K in combined risk and opportunity.</p>
+<p>Our platform evaluates the four pillars most important to your top and bottom line:</p>
+<ul>
+<li>Security gaps in your tech stack and site</li>
+<li>Key complaint themes driving customers away</li>
+<li>Your visibility on Google and AI search</li>
+<li>How you stack up against competitors — where you're winning, where you're losing</li>
+</ul>
+<p>Run it on a real business in your industry and see for yourself:<br>
+<a href="{PLATFORM_URL}">{PLATFORM_URL}</a></p>
+<p>Want one for {company_name}? Just reply.</p>
+{_signature_html()}
+</div>"""
+
+    return {"subject": subject, "body_text": body_text, "body_html": body_html, "to": p.get("email") or ""}
 
 
-def send_via_smtp(smtp, to: str, subject: str, body: str) -> str:
-    """Send an email through Gmail SMTP using an App Password.
+def send_via_smtp(smtp, to: str, subject: str, body_text: str, body_html: str) -> str:
+    """Send a multipart (plain + HTML) email via Gmail SMTP using an App Password.
     Returns a pseudo message-id for logging.
     """
-    msg = MIMEText(body, "plain", "utf-8")
+    msg = MIMEMultipart("alternative")
     msg["From"] = formataddr((SENDER_CONFIG["name"], GMAIL_ADDRESS))
     msg["To"] = to
     msg["Subject"] = subject
     if SENDER_CONFIG.get("reply_to"):
         msg["Reply-To"] = SENDER_CONFIG["reply_to"]
+    # Plain part first, HTML second — clients prefer the last/richest part
+    msg.attach(MIMEText(body_text, "plain", "utf-8"))
+    msg.attach(MIMEText(body_html, "html", "utf-8"))
 
-    # BCC is handled at the envelope level (recipients list), not a header,
-    # so the recipient doesn't see the HubSpot logging address.
+    # BCC at envelope level (recipient doesn't see the HubSpot log address)
     recipients = [to, BCC_HUBSPOT]
     smtp.sendmail(GMAIL_ADDRESS, recipients, msg.as_string())
     return f"smtp-{datetime.utcnow().strftime('%H%M%S')}-{to.split('@')[0]}"
@@ -291,7 +342,7 @@ def main() -> int:
         if DRY_RUN:
             log.info(f"[{i}/{len(contacts)}] WOULD SEND to {to}")
             log.info(f"    Subject: {email_data['subject']}")
-            log.info(f"    Body preview: {email_data['body'][:100]}...")
+            log.info(f"    Body preview: {email_data['body_text'][:100]}...")
             log_send({
                 "ts": datetime.utcnow().isoformat(),
                 "dry_run": True,
@@ -301,7 +352,8 @@ def main() -> int:
             continue
 
         try:
-            msg_id = send_via_smtp(smtp, to, email_data["subject"], email_data["body"])
+            msg_id = send_via_smtp(smtp, to, email_data["subject"],
+                                   email_data["body_text"], email_data["body_html"])
             sent += 1
             log.info(f"[{i}/{len(contacts)}] ✅ Sent to {to}  (msg={msg_id})")
             log_send({
