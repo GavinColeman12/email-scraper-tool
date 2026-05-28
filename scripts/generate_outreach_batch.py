@@ -133,12 +133,34 @@ VERTICAL_PHRASE = {
 }
 
 
+_SUFFIX_ACRONYMS = {"pa", "llc", "llp", "pllc", "pc", "dds", "md", "dmd",
+                    "cpa", "inc", "co", "ltd", "dpm", "od", "do", "esq",
+                    "lpa", "apc", "aps", "pllp", "usa", "nyc", "la"}
+_SMALL_WORDS = {"of", "the", "and", "for", "a", "an", "to", "in", "on",
+                "at", "by", "&", "or"}
+
+
+def _smart_title_case(name: str) -> str:
+    if not name or any(c.islower() for c in name):
+        return name
+    out = []
+    for i, w in enumerate(name.split()):
+        bare = w.lower().rstrip(".,").replace(".", "")
+        if bare in _SUFFIX_ACRONYMS:
+            out.append(w.upper())
+        elif w.lower().rstrip(".,") in _SMALL_WORDS and i != 0:
+            out.append(w.lower())
+        else:
+            out.append(w.capitalize())
+    return " ".join(out)
+
+
 def compose_email(contact: dict) -> dict:
     """Generate subject + body for a single contact."""
     p = contact["properties"]
     co = contact["_company"]
     first = (p.get("firstname") or "there").strip()
-    company_name = (co.get("name") or "your business").strip()
+    company_name = _smart_title_case((co.get("name") or "your business").strip())
     vertical = (co.get("business_vertical") or "Other").strip()
     phrase = VERTICAL_PHRASE.get(vertical, "businesses")
 

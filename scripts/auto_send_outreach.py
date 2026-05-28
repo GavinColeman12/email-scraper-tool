@@ -201,11 +201,38 @@ def _signature_html() -> str:
     )
 
 
+_SUFFIX_ACRONYMS = {"pa", "llc", "llp", "pllc", "pc", "dds", "md", "dmd",
+                    "cpa", "inc", "co", "ltd", "dpm", "od", "do", "esq",
+                    "pa", "lpa", "apc", "aps", "pllp", "usa", "nyc", "la"}
+_SMALL_WORDS = {"of", "the", "and", "for", "a", "an", "to", "in", "on",
+                "at", "by", "&", "or"}
+
+
+def _smart_title_case(name: str) -> str:
+    """Title-case an ALL-CAPS company name while preserving acronyms
+    (P.A., LLC, DDS) and lowercasing small words (of, the, and).
+    Leaves already-mixed-case names untouched.
+    """
+    if not name or any(c.islower() for c in name):
+        return name  # already cased correctly (or empty)
+    words = name.split()
+    out = []
+    for i, w in enumerate(words):
+        bare = w.lower().rstrip(".,").replace(".", "")
+        if bare in _SUFFIX_ACRONYMS:
+            out.append(w.upper())
+        elif w.lower().rstrip(".,") in _SMALL_WORDS and i != 0:
+            out.append(w.lower())
+        else:
+            out.append(w.capitalize())
+    return " ".join(out)
+
+
 def compose_email(contact: dict) -> dict:
     p = contact["properties"]
     co = contact["_company"]
     first = (p.get("firstname") or "there").strip()
-    company_name = (co.get("name") or "your business").strip()
+    company_name = _smart_title_case((co.get("name") or "your business").strip())
     vertical = (co.get("business_vertical") or "Other").strip()
     phrase = VERTICAL_PHRASE.get(vertical, "businesses")
 
