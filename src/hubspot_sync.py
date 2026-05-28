@@ -74,7 +74,7 @@ def _classify_vertical(business_type: Optional[str]) -> str:
     # "real estate agency", "talent agency", etc.)
     if any(w in t for w in ("realtor", "real estate", "realty", "broker", "property management")):
         return "Real Estate"
-    if any(w in t for w in ("dentist", "dental", "doctor", "clinic", "medical", "physician", "dermatolog", "chiropract", "veterinarian", "vet ")):
+    if any(w in t for w in ("dentist", "dental", "doctor", "clinic", "medical", "physician", "dermatolog", "chiropract", "veterinarian", "vet ", "smiles", "smile", "orthodont", "ortho", "endodont", "periodont", "oral surgery")):
         return "Healthcare / Dental"
     if any(w in t for w in ("plumber", "electrician", "contractor", "landscap", "roofing", "hvac", "construction", "remodel", "painter")):
         return "Home Services"
