@@ -89,9 +89,9 @@ SENDERS = {
 }
 SENDER_CONFIG = SENDERS.get(SENDER, SENDERS["gavin"])
 
-PLATFORM_URL = "https://crescendo-platform.crescendo-consulting.net/explore"
+PLATFORM_URL = os.environ.get("PLATFORM_URL", "https://crescendo-consulting.net/sonar/demo")
 
-# Signature links — edit these (LINKEDIN_URL especially — drop your real profile)
+# Signature links — edit these
 WEBSITE_URL = os.environ.get("WEBSITE_URL", "https://crescendo-consulting.net")
 LINKEDIN_URL = os.environ.get("LINKEDIN_URL", "")  # set to your LinkedIn profile URL
 DEMO_URL = os.environ.get("DEMO_URL", PLATFORM_URL)
