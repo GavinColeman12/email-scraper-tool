@@ -119,18 +119,33 @@ def fetch_list_members(list_id: str) -> list[dict]:
     return contacts
 
 
+VERTICAL_PHRASE = {
+    "Restaurant": "restaurants",
+    "Cafe / Bar / Brewery": "hospitality businesses",
+    "Hospitality (hotel, B&B)": "hospitality businesses",
+    "Retail / E-commerce": "retail businesses",
+    "Health & Wellness (salon, spa, gym)": "wellness businesses",
+    "Professional Services": "professional services firms",
+    "Home Services": "home-services businesses",
+    "Healthcare / Dental": "healthcare practices",
+    "Real Estate": "real estate businesses",
+    "Other": "businesses",
+}
+
+
 def compose_email(contact: dict) -> dict:
     """Generate subject + body for a single contact."""
     p = contact["properties"]
     co = contact["_company"]
     first = (p.get("firstname") or "there").strip()
     company_name = (co.get("name") or "your business").strip()
-    vertical = (co.get("business_vertical") or "service").strip()
+    vertical = (co.get("business_vertical") or "Other").strip()
+    phrase = VERTICAL_PHRASE.get(vertical, "businesses")
 
     subject = f"A diagnostic on {company_name}"
     body = f"""Hi {first},
 
-We're ex-Big 4 consultants and we built a platform that does the diagnostic work we used to charge a fortune for. For {vertical} businesses like yours, we routinely find north of $100K in combined risk and opportunity.
+We're ex-Big 4 consultants and we built a platform that does the diagnostic work we used to charge a fortune for. For {phrase} like yours, we routinely find north of $100K in combined risk and opportunity.
 
 Our platform evaluates the four pillars most important to your top and bottom line:
 • Security gaps in your tech stack and site
