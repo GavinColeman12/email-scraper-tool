@@ -320,7 +320,7 @@ def main() -> int:
         print()
         print(f"⚠️  About to SEND {len(contacts)} emails to real people.")
         print(f"   - Sender (FROM): {SENDER_CONFIG['name']} <{sender_email}>")
-        print(f"   - Reply-To: {REPLY_TO}")
+        print(f"   - Reply-To: {SENDER_CONFIG.get('reply_to') or '(your Gmail — replies come to you)'}")
         print(f"   - BCC: {BCC_HUBSPOT}")
         print(f"   - Pace: 1 email every {DELAY_SEC} seconds = ~{(len(contacts) * DELAY_SEC) // 60} min total")
         print(f"   - All sends logged to: {LOG_FILE}")
