@@ -325,9 +325,9 @@ def main() -> int:
         print(f"   - Pace: 1 email every {DELAY_SEC} seconds = ~{(len(contacts) * DELAY_SEC) // 60} min total")
         print(f"   - All sends logged to: {LOG_FILE}")
         print()
-        confirm = input("Type 'YES SEND' to proceed: ")
-        if confirm.strip() != "YES SEND":
-            log.info("Aborted.")
+        confirm = input("Type 'yes' to send (anything else aborts): ")
+        if confirm.strip().lower() not in ("yes", "y", "yes send"):
+            log.info(f"Got '{confirm.strip()}' — aborted (no emails sent).")
             return 0
 
     sent = 0
