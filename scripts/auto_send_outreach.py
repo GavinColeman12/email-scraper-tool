@@ -37,14 +37,15 @@ Env vars:
 """
 
 from __future__ import annotations
-import base64
 import json
 import logging
 import os
+import smtplib
 import sys
 import time
 from datetime import date, datetime
 from email.mime.text import MIMEText
+from email.utils import formataddr
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,7 +54,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import requests
-from src.gmail_client import get_gmail_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("autosend")
@@ -67,6 +67,10 @@ DELAY_SEC = int(os.environ.get("DELAY_SEC", "60"))
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"
 BCC_HUBSPOT = os.environ.get("BCC_HUBSPOT", "246276084@bcc.na2.hubspot.com")
 HARD_STOP_ON_ERROR = os.environ.get("HARD_STOP_ON_ERROR", "1") == "1"
+
+# SMTP credentials (App Password — no OAuth needed)
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "")
 
 # Sender identity — gavin (default), joanna, or custom via env
 SENDER = os.environ.get("SENDER", "gavin").lower()
@@ -179,22 +183,22 @@ Want one for {company_name}? Just reply.
     return {"subject": subject, "body": body, "to": p.get("email") or ""}
 
 
-def send_via_gmail(service, to: str, subject: str, body: str) -> str:
-    """Send an email through the authenticated Gmail account.
-    Returns the Gmail message ID.
+def send_via_smtp(smtp, to: str, subject: str, body: str) -> str:
+    """Send an email through Gmail SMTP using an App Password.
+    Returns a pseudo message-id for logging.
     """
     msg = MIMEText(body, "plain", "utf-8")
+    msg["From"] = formataddr((SENDER_CONFIG["name"], GMAIL_ADDRESS))
     msg["To"] = to
     msg["Subject"] = subject
     if SENDER_CONFIG.get("reply_to"):
         msg["Reply-To"] = SENDER_CONFIG["reply_to"]
-    msg["Bcc"] = BCC_HUBSPOT
 
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
-    result = service.users().messages().send(
-        userId="me", body={"raw": raw}
-    ).execute()
-    return result.get("id", "?")
+    # BCC is handled at the envelope level (recipients list), not a header,
+    # so the recipient doesn't see the HubSpot logging address.
+    recipients = [to, BCC_HUBSPOT]
+    smtp.sendmail(GMAIL_ADDRESS, recipients, msg.as_string())
+    return f"smtp-{datetime.utcnow().strftime('%H%M%S')}-{to.split('@')[0]}"
 
 
 def log_send(record: dict) -> None:
@@ -215,18 +219,24 @@ def main() -> int:
     log.info(f"BCC: {BCC_HUBSPOT} (HubSpot auto-log)")
     log.info("=" * 60)
 
-    # Gmail service
-    service = None
+    # SMTP connection (App Password — no OAuth)
+    smtp = None
+    sender_email = GMAIL_ADDRESS
     if not DRY_RUN:
-        log.info("Authenticating Gmail...")
-        service = get_gmail_service()
-        if not service:
-            log.error("Failed to authenticate Gmail. Check credentials.")
+        if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+            log.error("GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set in .env")
+            log.error("Generate an app password at myaccount.google.com/apppasswords")
             return 1
-        # Get sending account email for the log
-        profile = service.users().getProfile(userId="me").execute()
-        sender_email = profile.get("emailAddress", "?")
-        log.info(f"Authenticated as: {sender_email}")
+        log.info(f"Connecting to Gmail SMTP as {GMAIL_ADDRESS}...")
+        try:
+            smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
+            smtp.starttls()
+            smtp.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            log.info("✅ SMTP authenticated")
+        except Exception as e:
+            log.error(f"SMTP login failed: {e}")
+            log.error("Check GMAIL_ADDRESS + GMAIL_APP_PASSWORD. App passwords need 2FA enabled.")
+            return 1
 
     # Pull contacts
     log.info(f"Fetching HubSpot list {LIST_ID}...")
@@ -241,7 +251,7 @@ def main() -> int:
         # Final confirmation prompt
         print()
         print(f"⚠️  About to SEND {len(contacts)} emails to real people.")
-        print(f"   - Sender (FROM): authenticated Gmail account ({sender_email})")
+        print(f"   - Sender (FROM): {SENDER_CONFIG['name']} <{sender_email}>")
         print(f"   - Reply-To: {REPLY_TO}")
         print(f"   - BCC: {BCC_HUBSPOT}")
         print(f"   - Pace: 1 email every {DELAY_SEC} seconds = ~{(len(contacts) * DELAY_SEC) // 60} min total")
@@ -274,14 +284,14 @@ def main() -> int:
             continue
 
         try:
-            msg_id = send_via_gmail(service, to, email_data["subject"], email_data["body"])
+            msg_id = send_via_smtp(smtp, to, email_data["subject"], email_data["body"])
             sent += 1
-            log.info(f"[{i}/{len(contacts)}] ✅ Sent to {to}  (Gmail msg_id={msg_id})")
+            log.info(f"[{i}/{len(contacts)}] ✅ Sent to {to}  (msg={msg_id})")
             log_send({
                 "ts": datetime.utcnow().isoformat(),
                 "to": to,
                 "subject": email_data["subject"],
-                "gmail_msg_id": msg_id,
+                "msg_id": msg_id,
                 "status": "sent",
             })
         except Exception as e:
@@ -302,6 +312,12 @@ def main() -> int:
         if i < len(contacts):
             log.info(f"    Waiting {DELAY_SEC}s before next send...")
             time.sleep(DELAY_SEC)
+
+    if smtp:
+        try:
+            smtp.quit()
+        except Exception:
+            pass
 
     log.info("=" * 60)
     if DRY_RUN:
