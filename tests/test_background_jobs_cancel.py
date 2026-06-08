@@ -9,7 +9,6 @@ True) on cancel, plus an early-exit check in _safe_worker so newly-
 dequeued futures bail immediately.
 """
 import time
-import threading
 
 from src import background_jobs as bj
 

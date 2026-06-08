@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.volume_mode.stopwords import is_generic, email_is_generic, GENERIC_LOCAL_PARTS
+from src.volume_mode.stopwords import is_generic, email_is_generic
 from src.volume_mode.priors import (
     INDUSTRY_PRIORS, get_priors, normalize_vertical, build_email, DEFAULT_PRIOR,
 )
