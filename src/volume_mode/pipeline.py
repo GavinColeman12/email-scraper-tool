@@ -144,13 +144,12 @@ def scrape_volume(
     # imports from bounce_tracker which indirectly touches volume_mode
     # in some deployments.
     from src.universal_pipeline import (
-        _Cache, get_cache,
+        get_cache,
         _agent_website_scrape,
         _agent_linkedin_gated,
         _synthesise_owners,
         _triangulate_pattern,
         _nb_verify_cached,
-        _is_junk_name,
         OwnerCandidate,
     )
 
