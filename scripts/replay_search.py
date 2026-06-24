@@ -18,7 +18,6 @@ results of the original run. Only Phase 4-7 logic runs; it re-uses cached
 discovery + verification data.
 """
 import argparse
-import json
 import sys
 import time
 from dataclasses import asdict

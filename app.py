@@ -10,7 +10,6 @@ from src.dashboard_queries import (
     enriched_searches,
     industry_options,
     outreach_by_location,
-    normalize_vertical,
 )
 
 
