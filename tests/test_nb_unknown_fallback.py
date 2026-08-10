@@ -9,7 +9,7 @@ greylist or tarpit NB's verification probes. Greylisting clears within
 """
 from src.volume_mode.ranking import (
     Candidate, confidence_tier,
-    TIER_SCRAPED, TIER_REVIEW, TIER_VERIFIED, TIER_GUESS,
+    TIER_SCRAPED, TIER_REVIEW, TIER_VERIFIED,
 )
 
 
