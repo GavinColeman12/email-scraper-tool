@@ -5,8 +5,6 @@ name-mismatch rows.
 """
 from unittest.mock import MagicMock
 
-import pytest
-
 from src.review_rescue import (
     rescue_review_row, bulk_rescue, _extended_patterns,
     RescueResult, COST_NB_CALL,
