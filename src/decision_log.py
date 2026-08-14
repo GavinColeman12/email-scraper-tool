@@ -87,10 +87,7 @@ def _compute_scoring_block(business: dict) -> dict:
     instead of just the integer stored in lead_quality_score.
     """
     try:
-        from src.lead_scoring import (
-            compute_lead_quality_score, _business_dict_to_inputs,
-        )
-        from src.email_scoring import score_email_candidate, gate_decision
+        from src.lead_scoring import compute_lead_quality_score
     except Exception as e:
         return {"_error": f"could not import scorer: {e}"}
 
@@ -100,29 +97,10 @@ def _compute_scoring_block(business: dict) -> dict:
     except Exception as e:
         primary = {"_error": str(e)}
 
-    # Deep path — recover the structured EmailScore + the gate call.
-    deep = {}
-    try:
-        inputs = _business_dict_to_inputs(business)
-        if inputs is not None:
-            email_score = score_email_candidate(inputs)
-            deep["email_score"] = email_score.to_dict()
-            decision = gate_decision(email_score)
-            deep["gate_decision"] = {
-                "should_send": decision.should_send,
-                "should_verify_further": decision.should_verify_further,
-                "should_manual_review": decision.should_manual_review,
-                "should_skip": decision.should_skip,
-                "reason": decision.reason,
-            }
-    except Exception as e:
-        deep["_deep_error"] = str(e)
-
     return {
         "stored_score": business.get("lead_quality_score"),
         "stored_tier": business.get("lead_tier"),
         "recomputed": primary,
-        **deep,
     }
 
 
