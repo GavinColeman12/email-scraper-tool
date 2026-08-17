@@ -194,7 +194,7 @@ def followup_summary() -> dict:
     breakdown by reason for excluded rows. Used to show the operator
     what they're filtering against."""
     try:
-        from src.storage import _connect, _cursor, _PARAM
+        from src.storage import _connect, _cursor
     except Exception:
         return {}
     conn = _connect()

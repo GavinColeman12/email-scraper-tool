@@ -1388,6 +1388,13 @@ def scrape_with_triangulation(business: dict, use_neverbounce: bool = True,
     # Exposed to the CSV as the "Email Source" column.
     email_source_detail = _describe_email_source(result)
 
+    # NB result for the winning email — matches the candidate that produced best_email
+    nb = next(
+        (c.get("nb_result") for c in result.candidate_emails
+         if c.get("email") == result.best_email),
+        None,
+    )
+
     return {
         "primary_email": result.best_email or "",
         "scraped_emails": result.evidence_trail.get("discovered_emails", []) or [],
