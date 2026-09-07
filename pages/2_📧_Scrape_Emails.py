@@ -80,7 +80,7 @@ research_mode = st.radio(
     "Mode",
     mode_options,
     format_func=lambda k: mode_labels[k],
-    index=2,  # triangulation default
+    index=0,  # basic/volume default (triangulation is deprecated — see page 5)
 )
 deep_mode = research_mode == "deep"  # backward-compat alias for worker below
 

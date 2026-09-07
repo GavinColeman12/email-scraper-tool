@@ -29,6 +29,7 @@ Public surface preserved:
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 
@@ -97,8 +98,7 @@ def _last_name_in_business(last: str, business_name: str) -> bool:
     biz_l = business_name.lower()
     # Tokenize — avoid the "Martin" in "Martinez" false-positive
     biz_tokens = set()
-    import re as _re
-    for tok in _re.findall(r"[a-z]+", biz_l):
+    for tok in re.findall(r"[a-z]+", biz_l):
         biz_tokens.add(tok)
     return last_l in biz_tokens
 
